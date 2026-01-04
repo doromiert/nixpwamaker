@@ -375,4 +375,4 @@ if __name__ == "__main__":
 
     ctx = SystemContext(args.template)
     orch = PWAOrchestrator(ctx)
-    orch.sync(data)
+    o
