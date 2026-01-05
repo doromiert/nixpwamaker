@@ -1,110 +1,151 @@
-# pwamaker for nixos
+# nixpwamaker
 
-a firefox-based web app maker because there was none for some reason
+A declarative Nix/Home Manager module for generating isolated Firefox-based Progressive Web Apps (PWAs) with custom layouts, extension support, and `firefox-gnome-theme` integration.
 
-basically clanker-made (i wanted to get it out asap, don't smite me kay)
+## Overview
 
-clanker-made usage and docs or whatever ↓↓↓
+`nixpwamaker` allows you to define lightweight, site-specific browser instances in your Home Manager configuration. Unlike standard Firefox profiles, these instances are tailored for an "App-like" experience:
 
-# NixPWAMaker: Architecture & Usage
+- **Isolated Environments:** Each app has its own profile directory, cookies, and history.
+- **App Layout:** Hides standard navigation bars.
+- **Command Palette URL Bar:** The URL bar is hidden by default and appears as a floating overlay when focused (Ctrl+L), similar to a command palette.
+- **Declarative Extensions:** Install extensions directly via URL and ID.
+- **Theme Integration:** Built-in support for `firefox-gnome-theme`.
 
-## 1. How It Works (The "Sync Engine" Concept)
+## Installation
 
-NixPWAMaker bridges the gap between the **declarative** world of Nix and the **stateful** nature of Firefox profiles. It operates as a strict **Sync Engine** rather than a simple script.
+### Flake Input
 
-### The Pipeline
+Add `nixpwamaker` to your `flake.nix`:
 
-1. **Nix Configuration**: You define your apps in `home-manager`.
+```nix
+{
+    inputs = {
+        nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+        home-manager.url = "github:nix-community/home-manager";
 
-2. **Manifest Generation**: During build time, Nix serializes this config into a JSON file at `~/.config/firefoxpwa/nix-manifest.json`.
+        # Add nixpwamaker
+        nixpwamaker.url = "github:yourusername/nixpwamaker";
 
-3. **Activation Script**: When you run `home-manager switch`, the Python `pwamaker` binary is executed with this manifest.
+        # Optional: For GNOME theme integration
+        firefox-gnome-theme = {
+            url = "github:rafaelmardojai/firefox-gnome-theme";
+            flake = false;
+        };
+    };
 
-### The Sync Logic
+    outputs = { self, nixpkgs, home-manager, nixpwamaker, ... }@inputs: {
+        nixosConfigurations.hostname = nixpkgs.lib.nixosSystem {
+            modules = [
+                home-manager.nixosModules.home-manager
+                {
+                    home-manager.users.youruser = {
+                        imports = [
+                            nixpwamaker.homeManagerModules.pwamaker
+                        ];
 
-The script (`pwamaker.py`) performs a "Diff & Patch" operation on your system state:
-
-1. **Index Phase**: It scans `~/.local/share/applications` for existing desktop entries created by this tool (identified by `X-FirefoxPWA-Site` keys).
-
-2. **Prune Phase (Delete)**: It compares the existing apps against your new Nix manifest. Any app found on disk but missing from the manifest is **immediately deleted** (profile, site config, and desktop entry are removed).
-
-3. **Deploy Phase (Create/Update)**:
-
-   - **New Apps**: It generates a fresh ULID, copies the template profile, injects `user.js` (for layout) and `policies.json` (for extensions), and registers the site.
-
-   - **Existing Apps**: It updates the manifest, icon, and policies _without_ nuking the user data (cookies/passwords).
-
-### Isolation & Sanitation
-
-To ensure stability, the tool creates **Isolated Profiles**. It copies a base template but aggressively removes "memory" files (`extensions.json`, `startupCache`) to prevent the new PWA from inheriting garbage or conflicting extension states from the template.
-
-## 2. README / Setup Guide
-
-### Installation
-
-**1. Add the Input**
-Add `nixpwamaker` to your system `flake.nix`.
-
-```
-inputs = {
-nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
-nixpwamaker.url = "github:doromiert/nixpwamaker"; # <--- Add this
-};
-```
-
-**2. Import the Module**
-Pass the input to your Home Manager configuration.
-
-```
-# In your home-manager configuration file (e.g., home.nix or pwa.nix)
-{ inputs, ... }: {
-  imports = [ inputs.nixpwamaker.homeManagerModules.default ];
-
-  programs.nixpwamaker.enable = true;
+                        # Pass inputs if using the theme
+                        programs.pwamaker.firefoxGnomeTheme = inputs.firefox-gnome-theme;
+                    };
+                }
+            ];
+        };
+    };
 }
 ```
 
-### Configuration Example
+## Usage
 
-Define your apps using the `apps` attribute.
-programs.nixpwamaker.apps = {
-"YouTube" = {
-url = "https://www.youtube.com";
+Configure your apps in `home.nix` or your user module.
 
-    # Icons: Use a local path OR a system icon name (e.g., "youtube")
-    icon = "youtube";
+```nix
+programs.pwamaker = {
+    enable = true;
 
-    # Profile Template: Required base profile (can be a derivation or path)
-    templateProfile = ./resources/firefoxpwa/testprofile;
+    # Optional: Enable GNOME theme integration
+    # firefoxGnomeTheme = inputs.firefox-gnome-theme;
 
-    # Layout: Comma-separated list (arrows, refresh, spacer, spring)
-    layout = "arrows,refresh,spacer";
+    apps = {
+        youtube = {
+            name = "YouTube";
+            url = "https://www.youtube.com";
+            icon = "youtube"; # Icon name or path
 
-    # Extensions: ID:URL format
-    extensions = [
-      "uBlock0@raymondhill.net:https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi"
-    ];
+            # Optional: Install uBlock Origin
+            extensions = [
+                {
+                    id = "uBlock0@raymondhill.net";
+                    url = "https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi";
+                };
+            ];
 
-    # Policies: Inject enterprise policies directly
-    extraPolicies = {
-      DisableTelemetry = true;
-      DisablePocket = true;
+            # Optional: Custom CSS
+            userChrome = ''
+                #page-action-buttons { display: none !important; }
+            '';
+        };
+
+        chatgpt = {
+            name = "ChatGPT";
+            url = "https://chat.openai.com";
+            icon = "openai";
+            categories = [ "Office" "ArtificialIntelligence" ];
+        };
     };
-
-    # Integration: Keywords & Categories for your launcher
-    categories = [ "Network" "Video" ];
-    keywords = [ "stream" "google" ];
-
-    # Associations: Register as handler for specific protocols
-    mimeTypes = [ "x-scheme-handler/youtube" ];
-
 };
-};
+```
 
-### Tips
+## Configuration Options
 
-- **Icons**: If you provide a string (e.g., `"twitter"`), it will use your system's icon theme. If you provide a path (`./icon.png`), it will copy that file into the PWA.
+### `programs.pwamaker`
 
-- **Extensions**: You must provide the direct download URL for the XPI. The tool uses `force_installed` policy to install them silently.
+| Option              | Type              | Default | Description                                                                     |
+| :------------------ | :---------------- | :------ | :------------------------------------------------------------------------------ |
+| `enable`            | bool              | `false` | Enables the PWA Maker module.                                                   |
+| `firefoxGnomeTheme` | path              | `null`  | Path to `firefox-gnome-theme`. If set, applies the theme to all generated PWAs. |
+| `apps`              | attrsOf submodule | `{}`    | Attribute set of PWA configurations.                                            |
 
-- **Updates**: Changing `extraPolicies` or `extensions` in Nix will apply them next time you switch, without deleting your login sessions.
+### `programs.pwamaker.apps.<name>`
+
+| Option        | Type            | Description                                                           |
+| :------------ | :-------------- | :-------------------------------------------------------------------- |
+| `id`          | string          | Unique ID for the profile/directory. Defaults to the attribute name.  |
+| `name`        | string          | Display name in the desktop entry.                                    |
+| `url`         | string          | The target URL for the PWA.                                           |
+| `icon`        | string          | Icon name (from icon theme) or absolute path. Default: `web-browser`. |
+| `extensions`  | list            | List of extensions to install (see below).                            |
+| `layoutStart` | list of strings | Items to the left of tabs. Default: `["urlbar", "reload"]`.           |
+| `layoutEnd`   | list of strings | Items to the right of tabs. Default: `["addons"]`.                    |
+| `userChrome`  | lines           | Custom CSS appended to `userChrome.css`.                              |
+| `userContent` | lines           | Custom CSS appended to `userContent.css`.                             |
+| `extraPrefs`  | lines           | Extra lines appended to `user.js`.                                    |
+| `categories`  | list of strings | Desktop entry categories. Default: `["Network", "WebBrowser"]`.       |
+
+### Extensions Submodule
+
+To install extensions, you must provide the exact Extension ID (found in `manifest.json` of the extension) and a direct download URL.
+
+```nix
+extensions = [
+    {
+        id = "uBlock0@raymondhill.net";
+        url = "https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi";
+    }
+];
+```
+
+## Layout Customization
+
+You can customize the toolbar layout using the `layoutStart` and `layoutEnd` options. Available identifiers:
+
+- **Navigation:** `back`, `forward`, `reload`, `home`, `urlbar`
+- **Spacers:** `spacer`, `flexible`, `vertical-spacer`
+- **Window:** `minimize`, `maximize`, `close`
+- **Tools:** `menu`, `addons`, `downloads`, `library`, `sidebar`, `history`, `bookmarks`, `print`, `find`, `fullscreen`, `developer`
+- **PWA:** `site-info`, `notifications`, `tracking`, `identity`, `permissions`
+
+**Note:** The URL bar is styled to be hidden by default. Press `Ctrl+L` to float it over the content.
+
+## Maintenance
+
+The activation script automatically cleans up stale profiles in `~/.local/share/pwamaker-profiles` that are no longer defined in your configuration.
