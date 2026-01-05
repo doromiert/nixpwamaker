@@ -1,5 +1,5 @@
 {
-  description = "NixPWA Maker - Declarative Firefox PWAs for Home Manager";
+  description = "Firefox PWA Maker Module";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
@@ -8,6 +8,8 @@
   outputs =
     { self, nixpkgs, ... }:
     {
-      homeManagerModules.default = import ./module.nix;
+      # We simply export the module file.
+      # The consumer (your system config) will provide the theme input via options.
+      homeManagerModules.pwamaker = import ./modules/nixpwamaker.nix;
     };
 }
