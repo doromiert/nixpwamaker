@@ -1,6 +1,7 @@
+#!/usr/bin/env python3
 """
 Firefox PWA Sync Engine (NixOS/Home Manager)
-Features: Profile Isolation, Policy Injection, XDG Associations.
+Refined: Per-app template support & persistent data handling.
 """
 
 import argparse
@@ -38,7 +39,7 @@ def generate_ulid() -> str:
 
 
 class SystemContext:
-    def __init__(self, template_path: Optional[str] = None):
+    def __init__(self):
         # Resolve XDG paths
         home = Path.home()
         self.xdg_data = Path(os.environ.get("XDG_DATA_HOME", home / ".local" / "share"))
@@ -47,12 +48,6 @@ class SystemContext:
         self.profiles_dir = self.fpwa_root / "profiles"
         self.global_config = self.fpwa_root / "config.json"
         self.desktop_dir = self.xdg_data / "applications"
-
-        self.template_profile = Path(template_path) if template_path else None
-
-        if self.template_profile and not self.template_profile.exists():
-            log("!", f"Template profile not found: {self.template_profile}", "red")
-            sys.exit(1)
 
 
 # --- CORE LOGIC ---
@@ -64,17 +59,21 @@ class PWAProfileFactory:
     def __init__(self, ctx: SystemContext):
         self.ctx = ctx
 
-    def create(self, profile_id: str) -> Optional[Path]:
-        if not self.ctx.template_profile:
-            return None
-
+    def create_from_template(self, profile_id: str, template_path: str) -> bool:
+        """Clones a template into a new profile ID."""
+        source = Path(template_path)
         dest = self.ctx.profiles_dir / profile_id
+
+        if not source.exists():
+            log("!", f"Template not found: {source}", "red")
+            return False
+
         if dest.exists():
             shutil.rmtree(dest)
 
         # Copy Template
         shutil.copytree(
-            self.ctx.template_profile, dest,
+            source, dest,
             ignore=shutil.ignore_patterns('lock', '.parentlock'),
             dirs_exist_ok=True
         )
@@ -88,7 +87,7 @@ class PWAProfileFactory:
                 os.chmod(os.path.join(root, f), 0o644)
 
         self._sanitize(dest)
-        return dest
+        return True
 
     def _sanitize(self, profile_path: Path):
         """Removes stateful garbage that shouldn't be inherited."""
@@ -146,6 +145,7 @@ class PWAProfileFactory:
             layout_json = self._build_layout_json(layout)
             lines.append(f'user_pref("browser.uiCustomization.state", "{layout_json}");')
 
+        # We append to ensure we don't overwrite user changes, but overwrite key prefs
         with open(user_js, "a") as f:
             f.write("\n".join(lines) + "\n")
 
@@ -252,12 +252,12 @@ class PWAOrchestrator:
         existing_apps = self.state.scan_desktop_files()
         desired_names = set(manifest.keys())
 
-        # Prune
+        # 1. Prune missing apps
         for name, meta in existing_apps.items():
             if name not in desired_names:
                 self.state.nuke(name, meta)
 
-        # Create/Update
+        # 2. Deploy/Update apps
         for name, config in manifest.items():
             self.deploy(name, config, existing_apps.get(name))
 
@@ -275,10 +275,8 @@ class PWAOrchestrator:
 
         url = self.resolve_url(config['url'])
         icon = config.get('icon')
-        mime_types = config.get('mimeTypes', [])
-        categories = config.get('categories', [])
-        keywords = config.get('keywords', [])
-
+        template = config.get('templateProfile')
+        
         reg = self.state.get_registry()
 
         if existing_meta:
@@ -294,7 +292,7 @@ class PWAOrchestrator:
         site_path = self.ctx.sites_dir / site_id
         site_path.mkdir(parents=True, exist_ok=True)
 
-        # Manifest
+        # Write Manifest
         web_manifest = {
             "name": name, "short_name": name, "start_url": url,
             "scope": f"{urlparse(url).scheme}://{urlparse(url).netloc}/",
@@ -308,13 +306,23 @@ class PWAOrchestrator:
             if os.path.exists(icon):
                 shutil.copy(icon, site_path / "icon.png")
 
-        # Profile Generation
-        profile_path = self.factory.create(profile_id)
-        if profile_path:
+        # Profile Handling
+        profile_path = self.ctx.profiles_dir / profile_id
+        
+        # If the profile directory doesn't exist, we clone from the template
+        if not profile_path.exists():
+            if template:
+                log(" ", f"Cloning template for {name}...", "green")
+                self.factory.create_from_template(profile_id, template)
+            else:
+                log("!", f"No existing profile for {name} and no template provided in Nix config.", "red")
+        
+        # We ALWAYS inject prefs/policies so that extensions and UI updates apply without re-cloning
+        if profile_path.exists():
             self.factory.inject_prefs(profile_path, config.get('layout', ''))
             self.factory.inject_policies(profile_path, config.get('extensions', []), config.get('extraPolicies', {}))
 
-        # Registration
+        # Update Registry
         reg["profiles"][profile_id] = {"ulid": profile_id, "name": name, "sites": [site_id]}
         reg["sites"][site_id] = {
             "ulid": site_id, "profile": profile_id,
@@ -323,9 +331,9 @@ class PWAOrchestrator:
         self.state.save_registry(reg)
 
         # Desktop Entry
-        self._write_desktop_entry(name, site_id, site_path, icon, mime_types, categories, keywords)
+        self._write_desktop_entry(name, site_id, site_path, icon, config)
 
-    def _write_desktop_entry(self, name, site_id, site_path, icon_source, mime_types, categories, keywords):
+    def _write_desktop_entry(self, name, site_id, site_path, icon_source, config):
         safe_slug = "".join(c for c in name if c.isalnum()).lower()
 
         if icon_source and os.path.exists(icon_source):
@@ -333,13 +341,16 @@ class PWAOrchestrator:
         else:
             icon_str = icon_source or f"{site_path}/icon.png"
 
+        mime_types = config.get('mimeTypes', [])
         mime_line = f"MimeType={';'.join(mime_types)};\n" if mime_types else ""
 
+        categories = config.get('categories', [])
         cat_str = ";".join(categories)
         if cat_str and not cat_str.endswith(";"):
             cat_str += ";"
         cat_line = f"Categories={cat_str}\n" if cat_str else "Categories=Network;WebBrowser;\n"
 
+        keywords = config.get('keywords', [])
         key_str = ";".join(keywords)
         if key_str and not key_str.endswith(";"):
             key_str += ";"
@@ -368,13 +379,11 @@ class PWAOrchestrator:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", required=True)
-    parser.add_argument("--template", help="Path to template profile")
     args = parser.parse_args()
 
     with open(args.manifest) as f:
         data = json.load(f)
 
-    ctx = SystemContext(args.template)
+    ctx = SystemContext()
     orch = PWAOrchestrator(ctx)
     orch.sync(data)
-    
