@@ -10,11 +10,17 @@ with lib;
 let
   cfg = config.programs.nixpwamaker;
 
+  # We use flakeIgnore to prevent trivial formatting issues from breaking the build
   pwamakerBin = pkgs.writers.writePython3Bin "pwamaker" {
     libraries = [ ];
     flakeIgnore = [
       "E501"
       "E302"
+      "E701"
+      "W293"
+      "E305"
+      "W292"
+      "F821"
     ];
   } (builtins.readFile ./pwamaker.py);
 
@@ -42,7 +48,7 @@ let
         default = { };
       };
 
-      # New Options
+      # Associations
       mimeTypes = mkOption {
         type = types.listOf types.str;
         default = [ ];
@@ -54,12 +60,12 @@ let
           "Network"
           "WebBrowser"
         ];
-        description = "XDG Categories (semicolon separated in desktop file)";
+        description = "XDG Categories (semicolon separated)";
       };
       keywords = mkOption {
         type = types.listOf types.str;
         default = [ ];
-        description = "Search keywords for the desktop entry";
+        description = "Search keywords";
       };
     };
   };

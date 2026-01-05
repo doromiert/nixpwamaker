@@ -67,15 +67,39 @@ Pass the input to your Home Manager configuration.
 ### Configuration Example
 
 Define your apps using the `apps` attribute.
+programs.nixpwamaker.apps = {
+"YouTube" = {
+url = "https://www.youtube.com";
 
-```
-# In your home-manager configuration file (e.g., home.nix or pwa.nix)
-{ inputs, ... }: {
-  imports = [ inputs.nixpwamaker.homeManagerModules.default ];
+    # Icons: Use a local path OR a system icon name (e.g., "youtube")
+    icon = "youtube";
 
-  programs.nixpwamaker.enable = true;
-}
-```
+    # Profile Template: Required base profile (can be a derivation or path)
+    templateProfile = ./resources/firefoxpwa/testprofile;
+
+    # Layout: Comma-separated list (arrows, refresh, spacer, spring)
+    layout = "arrows,refresh,spacer";
+
+    # Extensions: ID:URL format
+    extensions = [
+      "uBlock0@raymondhill.net:https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi"
+    ];
+
+    # Policies: Inject enterprise policies directly
+    extraPolicies = {
+      DisableTelemetry = true;
+      DisablePocket = true;
+    };
+
+    # Integration: Keywords & Categories for your launcher
+    categories = [ "Network" "Video" ];
+    keywords = [ "stream" "google" ];
+
+    # Associations: Register as handler for specific protocols
+    mimeTypes = [ "x-scheme-handler/youtube" ];
+
+};
+};
 
 ### Tips
 

@@ -1,7 +1,6 @@
-#!/usr/bin/env python3
 """
 Firefox PWA Sync Engine (NixOS/Home Manager)
-Features: Profile Isolation, Policy Injection, XDG Associations, Keywords/Categories.
+Features: Profile Isolation, Policy Injection, XDG Associations.
 """
 
 import argparse
@@ -40,7 +39,9 @@ def generate_ulid() -> str:
 
 class SystemContext:
     def __init__(self, template_path: Optional[str] = None):
-        self.xdg_data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+        # Resolve XDG paths
+        home = Path.home()
+        self.xdg_data = Path(os.environ.get("XDG_DATA_HOME", home / ".local" / "share"))
         self.fpwa_root = self.xdg_data / "firefoxpwa"
         self.sites_dir = self.fpwa_root / "sites"
         self.profiles_dir = self.fpwa_root / "profiles"
@@ -375,4 +376,5 @@ if __name__ == "__main__":
 
     ctx = SystemContext(args.template)
     orch = PWAOrchestrator(ctx)
-    o
+    orch.sync(data)
+    
