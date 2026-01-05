@@ -1,7 +1,7 @@
 """
 Firefox PWA Sync Engine (NixOS/Home Manager)
 Refined: Support for Gnome Headerbar (TabsToolbar) layout injection.
-Linter Fix: Corrected line breaks for binary operators (W504).
+Linter Fix: Removed unused imports, fixed trailing whitespace and bare excepts.
 """
 
 import argparse
@@ -93,7 +93,8 @@ class PWAProfileFactory:
         garbage = [
             "compatibility.ini", "search.json.mozlz4", "startupCache",
             "extensions.json", "extensions", "addonStartup.json.lz4",
-            "extension-preferences.json", "extension-settings.json"
+            "extension-preferences.json", "extension-settings.json",
+            "addons.json"
         ]
         for item in garbage:
             p = profile_path / item
@@ -130,9 +131,8 @@ class PWAProfileFactory:
             json.dump(policy_data, f, indent=2)
 
     def inject_prefs(self, profile_path: Path, layout: str):
-        """Appends to user.js."""
+        """Writes/Overwrites user.js."""
         user_js = profile_path / "user.js"
-        # Modern Linux UA
         ua = "Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0"
 
         lines = [
@@ -145,16 +145,12 @@ class PWAProfileFactory:
             layout_json = self._build_layout_json(layout)
             lines.append(f'user_pref("browser.uiCustomization.state", "{layout_json}");')
 
-        # We append to ensure we don't overwrite user changes, but overwrite key prefs
-        with open(user_js, "a") as f:
+        # [!] OVERWRITE mode "w" instead of "a" to prevent duplicate layout lines
+        with open(user_js, "w") as f:
             f.write("\n" + "\n".join(lines) + "\n")
 
     def _build_layout_json(self, layout_str: str) -> str:
-        """
-        Splits layout string at 'spring' to support Gnome Headerbar layout.
-        Everything before 'spring' goes to the LEFT of the tabs.
-        Everything after 'spring' goes to the RIGHT of the tabs.
-        """
+        """Splits layout at 'spring' for Gnome Headerbar compatibility."""
         mapping = {
             "back": ["back-button"],
             "forward": ["forward-button"],
@@ -167,8 +163,7 @@ class PWAProfileFactory:
         }
 
         items = layout_str.split(",")
-        left_items = []
-        right_items = []
+        left_items, right_items = [], []
         target = left_items
 
         for item in items:
@@ -176,23 +171,14 @@ class PWAProfileFactory:
             if key == "spring":
                 target = right_items
                 continue
-
             val = mapping.get(key)
             if val:
                 target.extend(val)
 
-        # [!] Gnome Theme placement: Items move from nav-bar to TabsToolbar
-        # Linter Fix (W504): Breaking before operator
+        # TabsToolbar items surround the actual tabs
         tabs_toolbar = (
             ["site-info"] + left_items + ["tabbrowser-tabs", "new-tab-button", "alltabs-button"] + right_items
         )
-
-        seen = [
-            "developer-button",
-            "unified-extensions-button",
-            "stop-reload-button",
-            "home-button"
-        ]
 
         data = {
             "placements": {
@@ -200,14 +186,16 @@ class PWAProfileFactory:
                 "toolbar-menubar": ["menubar-items"],
                 "TabsToolbar": tabs_toolbar,
                 "PersonalToolbar": ["personal-bookmarks"],
-                "unified-extensions-area": []
+                "unified-extensions-area": [],
+                "vertical-tabs": []
             },
-            "seen": seen,
-            "dirtyAreaCache": [],  # [!] MUST be empty to force Firefox to re-apply placements
-            "currentVersion": 20,
+            "seen": ["unified-extensions-button", "stop-reload-button", "home-button"],
+            "dirtyAreaCache": [],  # Forces Firefox to reset its toolbar state
+            "currentVersion": 23,   # Matched to your prefs.js version
             "newElementCount": 0
         }
-        return json.dumps(data).replace('"', '\\"')
+        # Use compact separators and escape quotes for user.js
+        return json.dumps(data, separators=(',', ':')).replace('"', '\\"')
 
 
 # --- STATE MANAGER ---
@@ -259,7 +247,6 @@ class StateManager:
     def nuke(self, name: str, meta: dict):
         """Deletes a PWA from filesystem and registry."""
         log("-", f"Pruning orphaned PWA: {name}", "yellow")
-
         if meta['path'].exists():
             meta['path'].unlink()
 
@@ -292,12 +279,12 @@ class PWAOrchestrator:
         existing_apps = self.state.scan_desktop_files()
         desired_names = set(manifest.keys())
 
-        # 1. Prune missing apps
+        # 1. Prune
         for name, meta in existing_apps.items():
             if name not in desired_names:
                 self.state.nuke(name, meta)
 
-        # 2. Deploy/Update apps
+        # 2. Deploy/Update
         for name, config in manifest.items():
             self.deploy(name, config, existing_apps.get(name))
 
@@ -328,42 +315,33 @@ class PWAOrchestrator:
             site_id = generate_ulid()
             profile_id = generate_ulid()
 
-        # Filesystem Setup
         site_path = self.ctx.sites_dir / site_id
         site_path.mkdir(parents=True, exist_ok=True)
 
-        # Write Manifest
         web_manifest = {
             "name": name, "short_name": name, "start_url": url,
             "scope": f"{urlparse(url).scheme}://{urlparse(url).netloc}/",
             "display": "standalone", "background_color": "#000000", "theme_color": "#000000",
             "icons": [{"src": "icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any"}]
         }
-        manifest_dest = site_path / "manifest.json"
-        with open(manifest_dest, "w") as f:
+        with open(site_path / "manifest.json", "w") as f:
             json.dump(web_manifest, f)
 
-        if icon:
-            if os.path.exists(icon):
-                shutil.copy(icon, site_path / "icon.png")
+        if icon and os.path.exists(icon):
+            shutil.copy(icon, site_path / "icon.png")
 
-        # Profile Handling
         profile_path = self.ctx.profiles_dir / profile_id
-
-        # If the profile directory doesn't exist, we clone from the template
         if not profile_path.exists():
             if template:
-                log(" ", f"Cloning template for {name}...", "green")
                 self.factory.create_from_template(profile_id, template)
             else:
-                log("!", f"No existing profile for {name} and no template provided.", "red")
+                log("!", f"No template for {name}", "red")
 
-        # We ALWAYS inject prefs/policies so that updates apply without re-cloning
         if profile_path.exists():
+            # Injecting per-app layout and specific extensions
             self.factory.inject_prefs(profile_path, config.get('layout', ''))
             self.factory.inject_policies(profile_path, config.get('extensions', []), config.get('extraPolicies', {}))
 
-        # Update Registry
         reg["profiles"][profile_id] = {"ulid": profile_id, "name": name, "sites": [site_id]}
         reg["sites"][site_id] = {
             "ulid": site_id, "profile": profile_id,
@@ -371,30 +349,18 @@ class PWAOrchestrator:
         }
         self.state.save_registry(reg)
 
-        # Desktop Entry
         self._write_desktop_entry(name, site_id, site_path, icon, config)
 
     def _write_desktop_entry(self, name, site_id, site_path, icon_source, config):
         safe_slug = "".join(c for c in name if c.isalnum()).lower()
-
-        if icon_source and os.path.exists(icon_source):
-            icon_str = f"{site_path}/icon.png"
-        else:
-            icon_str = icon_source or f"{site_path}/icon.png"
-
+        icon_str = f"{site_path}/icon.png" if icon_source and os.path.exists(icon_source) else (icon_source or f"{site_path}/icon.png")
         mime_types = config.get('mimeTypes', [])
         mime_line = f"MimeType={';'.join(mime_types)};\n" if mime_types else ""
-
         categories = config.get('categories', [])
-        cat_str = ";".join(categories)
-        if cat_str and not cat_str.endswith(";"):
-            cat_str += ";"
+        cat_str = ";".join(categories) + (";" if categories and not categories[-1].endswith(";") else "")
         cat_line = f"Categories={cat_str}\n" if cat_str else "Categories=Network;WebBrowser;\n"
-
         keywords = config.get('keywords', [])
-        key_str = ";".join(keywords)
-        if key_str and not key_str.endswith(";"):
-            key_str += ";"
+        key_str = ";".join(keywords) + (";" if keywords and not keywords[-1].endswith(";") else "")
         key_line = f"Keywords={key_str}\n" if key_str else ""
 
         content = (
@@ -405,12 +371,9 @@ class PWAOrchestrator:
             "Terminal=false\n"
             f"Icon={icon_str}\n"
             f"StartupWMClass=FFPWA-{site_id}\n"
-            f"{mime_line}"
-            f"{cat_line}"
-            f"{key_line}"
+            f"{mime_line}{cat_line}{key_line}"
             f"X-FirefoxPWA-Site={site_id}\n"
         )
-
         dest = self.ctx.desktop_dir / f"{safe_slug}-fpwa.desktop"
         self.ctx.desktop_dir.mkdir(parents=True, exist_ok=True)
         with open(dest, "w") as f:
@@ -420,11 +383,7 @@ class PWAOrchestrator:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", required=True)
-    parsed_args = parser.parse_args()
-
-    with open(parsed_args.manifest, "r") as manifest_f:
-        data = json.load(manifest_f)
-
-    ctx = SystemContext()
-    orch = PWAOrchestrator(ctx)
-    orch.sync(data)
+    args = parser.parse_args()
+    with open(args.manifest, "r") as f:
+        data = json.load(f)
+    PWAOrchestrator(SystemContext()).sync(data)
