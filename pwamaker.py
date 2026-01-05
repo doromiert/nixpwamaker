@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Firefox PWA Sync Engine (NixOS/Home Manager)
 Refined: Per-app template support & persistent data handling.
@@ -8,7 +7,6 @@ import argparse
 import json
 import os
 import shutil
-import sys
 import random
 import re
 import urllib.request
