@@ -1,6 +1,7 @@
 """
 Firefox PWA Sync Engine (NixOS/Home Manager)
-Refined: Per-app template support & persistent data handling.
+Refined: Support for Gnome Headerbar (TabsToolbar) layout injection.
+Linter Fix: Corrected line breaks for binary operators (W504).
 """
 
 import argparse
@@ -124,7 +125,8 @@ class PWAProfileFactory:
                 "default_area": "menupanel"
             }
 
-        with open(dist_dir / "policies.json", "w") as f:
+        policy_dest = dist_dir / "policies.json"
+        with open(policy_dest, "w") as f:
             json.dump(policy_data, f, indent=2)
 
     def inject_prefs(self, profile_path: Path, layout: str):
@@ -145,25 +147,65 @@ class PWAProfileFactory:
 
         # We append to ensure we don't overwrite user changes, but overwrite key prefs
         with open(user_js, "a") as f:
-            f.write("\n".join(lines) + "\n")
+            f.write("\n" + "\n".join(lines) + "\n")
 
     def _build_layout_json(self, layout_str: str) -> str:
+        """
+        Splits layout string at 'spring' to support Gnome Headerbar layout.
+        Everything before 'spring' goes to the LEFT of the tabs.
+        Everything after 'spring' goes to the RIGHT of the tabs.
+        """
         mapping = {
+            "back": ["back-button"],
+            "forward": ["forward-button"],
             "arrows": ["back-button", "forward-button"],
             "refresh": ["stop-reload-button"],
+            "home": ["home-button"],
+            "extensions": ["unified-extensions-button"],
             "spacer": ["spacer"],
             "spring": ["spring"]
         }
-        nav = []
-        for item in layout_str.split(","):
-            val = mapping.get(item.strip().lower())
+
+        items = layout_str.split(",")
+        left_items = []
+        right_items = []
+        target = left_items
+
+        for item in items:
+            key = item.strip().lower()
+            if key == "spring":
+                target = right_items
+                continue
+
+            val = mapping.get(key)
             if val:
-                nav.extend(val)
+                target.extend(val)
+
+        # [!] Gnome Theme placement: Items move from nav-bar to TabsToolbar
+        # Linter Fix (W504): Breaking before operator
+        tabs_toolbar = (
+            ["site-info"] + left_items + ["tabbrowser-tabs", "new-tab-button", "alltabs-button"] + right_items
+        )
+
+        seen = [
+            "developer-button",
+            "unified-extensions-button",
+            "stop-reload-button",
+            "home-button"
+        ]
 
         data = {
-            "placements": {"nav-bar": nav, "unified-extensions-area": []},
-            "seen": nav,
-            "currentVersion": 20
+            "placements": {
+                "nav-bar": ["sidebar-button", "close-page-button", "urlbar-container", "vertical-spacer"],
+                "toolbar-menubar": ["menubar-items"],
+                "TabsToolbar": tabs_toolbar,
+                "PersonalToolbar": ["personal-bookmarks"],
+                "unified-extensions-area": []
+            },
+            "seen": seen,
+            "dirtyAreaCache": [],  # [!] MUST be empty to force Firefox to re-apply placements
+            "currentVersion": 20,
+            "newElementCount": 0
         }
         return json.dumps(data).replace('"', '\\"')
 
@@ -274,7 +316,7 @@ class PWAOrchestrator:
         url = self.resolve_url(config['url'])
         icon = config.get('icon')
         template = config.get('templateProfile')
-        
+
         reg = self.state.get_registry()
 
         if existing_meta:
@@ -297,7 +339,8 @@ class PWAOrchestrator:
             "display": "standalone", "background_color": "#000000", "theme_color": "#000000",
             "icons": [{"src": "icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any"}]
         }
-        with open(site_path / "manifest.json", "w") as f:
+        manifest_dest = site_path / "manifest.json"
+        with open(manifest_dest, "w") as f:
             json.dump(web_manifest, f)
 
         if icon:
@@ -306,16 +349,16 @@ class PWAOrchestrator:
 
         # Profile Handling
         profile_path = self.ctx.profiles_dir / profile_id
-        
+
         # If the profile directory doesn't exist, we clone from the template
         if not profile_path.exists():
             if template:
                 log(" ", f"Cloning template for {name}...", "green")
                 self.factory.create_from_template(profile_id, template)
             else:
-                log("!", f"No existing profile for {name} and no template provided in Nix config.", "red")
-        
-        # We ALWAYS inject prefs/policies so that extensions and UI updates apply without re-cloning
+                log("!", f"No existing profile for {name} and no template provided.", "red")
+
+        # We ALWAYS inject prefs/policies so that updates apply without re-cloning
         if profile_path.exists():
             self.factory.inject_prefs(profile_path, config.get('layout', ''))
             self.factory.inject_policies(profile_path, config.get('extensions', []), config.get('extraPolicies', {}))
@@ -377,10 +420,10 @@ class PWAOrchestrator:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", required=True)
-    args = parser.parse_args()
+    parsed_args = parser.parse_args()
 
-    with open(args.manifest) as f:
-        data = json.load(f)
+    with open(parsed_args.manifest, "r") as manifest_f:
+        data = json.load(manifest_f)
 
     ctx = SystemContext()
     orch = PWAOrchestrator(ctx)
