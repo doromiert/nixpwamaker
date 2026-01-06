@@ -410,7 +410,7 @@ let
         layoutStart = mkOption {
           type = types.listOf types.str;
           default = [
-            "urlbar"
+            "home"
             "reload"
           ];
         };
