@@ -13,6 +13,39 @@ let
   # --- Constants & Paths ---
   profileBaseDir = "${config.home.homeDirectory}/.local/share/pwamaker-profiles";
 
+  # Default engines to hide when a custom PWA engine is active
+  commonHidden = "Google,Bing,Amazon.com,DuckDuckGo,Wikipedia (en)";
+
+  # --- Python Script for MozLZ4 Compression ---
+  mozlz4Script = pkgs.writeScript "json2mozlz4.py" ''
+    #!${pkgs.python3}/bin/python3
+    import sys
+    import os
+    import json
+
+    try:
+        import lz4.block
+    except ImportError:
+        sys.stderr.write("Error: python3-lz4 not found.\n")
+        sys.exit(1)
+
+    if len(sys.argv) != 2:
+        sys.stderr.write("Usage: json2mozlz4.py <output_file>\n")
+        sys.exit(1)
+
+    output_path = sys.argv[1]
+    json_input = sys.stdin.read()
+    json_data = json_input.encode('utf-8')
+
+    header = b"mozLz40\0"
+    compressed = lz4.block.compress(json_data)
+
+    with open(output_path, 'wb') as f:
+        f.write(header + compressed)
+  '';
+
+  pythonWithLz4 = pkgs.python3.withPackages (ps: [ ps.lz4 ]);
+
   # --- Layout Definitions ---
   layoutMap = {
     "back" = "back-button";
@@ -89,32 +122,22 @@ let
 
   # --- Autoconfig Script (Global) ---
   globalMozillaCfg = ''
-    // mozilla.cfg - PWA Focus & URL Override
-    // IMPORTANT: The first line must be a comment.
-
-    // DEBUG: Print to stdout (terminal) so we know this file loaded.
+    // mozilla.cfg - PWA Focus, URL Override
     if (typeof dump !== 'undefined') dump("PWA_DEBUG: mozilla.cfg is loading...\n");
 
     try {
-      // --- HELPER: XPCOM Service Getter ---
       const getService = (contractID, interfaceName) => 
         Cc[contractID].getService(Ci[interfaceName]);
 
-      // --- 1. SETUP SERVICES (Fallbacks for broken ESMs) ---
       let Services = {};
-      
       try {
-         // Try Loading Services ESM (Standard)
          if (ChromeUtils.importESModule) {
             const { Services: s } = ChromeUtils.importESModule("resource://gre/modules/Services.sys.mjs");
             Services = s;
          } else {
-            // Very old fallback
             Services = ChromeUtils.import("resource://gre/modules/Services.jsm").Services;
          }
       } catch(e) {
-         if (typeof dump !== 'undefined') dump("PWA_DEBUG: Services ESM load failed (" + e + "), using XPCOM fallback.\n");
-         // Fallback to XPCOM interfaces if module loading fails
          Services = {
            dirsvc: getService("@mozilla.org/file/directory_service;1", "nsIProperties"),
            obs: getService("@mozilla.org/observer-service;1", "nsIObserverService"),
@@ -123,14 +146,13 @@ let
          };
       }
       
-      // Ensure SecurityManager is available
       const getSSM = () => {
          if (Services.scriptSecurityManager) return Services.scriptSecurityManager;
          try { return getService("@mozilla.org/scriptsecuritymanager;1", "nsIScriptSecurityManager"); } 
          catch(e) { return null; }
       };
 
-      // --- 2. READ PROFILE CONFIG (pwa.json) ---
+      // READ PROFILE CONFIG
       let pwaConfig = {};
       try {
         let profileDir = Services.dirsvc.get("ProfD", Ci.nsIFile);
@@ -138,79 +160,52 @@ let
         configFile.append("pwa.json");
         
         if (configFile.exists()) {
-          // Standard File Input Stream
-          let fstream = Cc["@mozilla.org/network/file-input-stream;1"]
-                          .createInstance(Ci.nsIFileInputStream);
+          let fstream = Cc["@mozilla.org/network/file-input-stream;1"].createInstance(Ci.nsIFileInputStream);
           fstream.init(configFile, -1, 0, 0);
-          
-          // Converter Stream to handle UTF-8 text properly
-          let cstream = Cc["@mozilla.org/intl/converter-input-stream;1"]
-                          .createInstance(Ci.nsIConverterInputStream);
+          let cstream = Cc["@mozilla.org/intl/converter-input-stream;1"].createInstance(Ci.nsIConverterInputStream);
           cstream.init(fstream, "UTF-8", 0, 0);
           
           let str = {};
-          // Read entire stream
           cstream.readString(-1, str);
           cstream.close();
           fstream.close();
-          
-          // Parse JSON from string
           pwaConfig = JSON.parse(str.value);
-          
-          if (typeof dump !== 'undefined') dump("PWA_DEBUG: Loaded pwa.json for " + pwaConfig.name + "\n");
-        } else {
-          if (typeof dump !== 'undefined') dump("PWA_DEBUG: pwa.json not found in " + profileDir.path + "\n");
         }
       } catch (ex) {
         if (typeof dump !== 'undefined') dump("PWA_DEBUG: Error reading pwa.json: " + ex + "\n");
       }
 
-      // --- 3. APPLY NEW TAB URL (Method A: AboutNewTab Service) ---
+      // APPLY NEW TAB URL
       if (pwaConfig.url) {
         try {
-          // Attempt to set via AboutNewTab service (Preferred)
           const { AboutNewTab } = ChromeUtils.importESModule("resource:///modules/AboutNewTab.sys.mjs");
           AboutNewTab.newTabURL = pwaConfig.url;
-          if (typeof dump !== 'undefined') dump("PWA_DEBUG: Set AboutNewTab.newTabURL to " + pwaConfig.url + "\n");
-        } catch(e) {
-           if (typeof dump !== 'undefined') dump("PWA_DEBUG: Failed to set AboutNewTab.newTabURL: " + e + "\n");
-        }
+        } catch(e) {}
       }
 
-      // --- 4. DEFINE FOCUS & REDIRECT LOGIC ---
+      // FOCUS LOGIC
       const forceContentFocus = (win) => {
         if (win && win.gBrowser && win.gBrowser.selectedBrowser) {
           win.setTimeout(() => {
             const browser = win.gBrowser.selectedBrowser;
-            
-            // Method B: Direct Redirect
-            // If the user just opened a new tab, it might be about:newtab, about:blank, or about:home
             const currentSpec = browser.currentURI ? browser.currentURI.spec : "";
+            
             if (pwaConfig.url && (currentSpec === "about:newtab" || currentSpec === "about:home" || currentSpec === "about:blank")) {
-               if (typeof dump !== 'undefined') dump("PWA_DEBUG: Forcing redirect from " + currentSpec + " to " + pwaConfig.url + "\n");
-               
                try {
-                   // fixupAndLoadURIString is robust for partial URLs, but loadURI with ssm is safer for full URLs
                    const ssm = getSSM();
                    const triggeringPrincipal = ssm ? ssm.getSystemPrincipal() : null;
-                   
                    if (browser.fixupAndLoadURIString) {
                         browser.fixupAndLoadURIString(pwaConfig.url, { triggeringPrincipal });
                    } else {
                         browser.loadURI(pwaConfig.url, { triggeringPrincipal });
                    }
-               } catch(e) {
-                   if (typeof dump !== 'undefined') dump("PWA_DEBUG: Redirect failed: " + e + "\n");
-               }
+               } catch(e) {}
             }
-
-            // Force Focus
             browser.focus();
           }, 0);
         }
       };
       
-      // Helper to find top window robustly
       const getTopWindow = () => {
          try {
             const { BrowserWindowTracker } = ChromeUtils.importESModule("resource:///modules/BrowserWindowTracker.sys.mjs");
@@ -220,7 +215,6 @@ let
          }
       };
 
-      // --- 5. OBSERVERS ---
       const NewTabObserver = {
         observe: function(subject, topic, data) {
           if (topic === "browser-open-newtab-start") {
@@ -234,17 +228,14 @@ let
         observe: function(subject, topic, data) {
           const win = subject;
           win.addEventListener("load", () => {
-            forceContentFocus(win);
+             forceContentFocus(win);
           }, { once: true });
         }
       };
 
-      // Register Observers
       if (Services.obs) {
         Services.obs.addObserver(NewTabObserver, "browser-open-newtab-start", false);
         Services.obs.addObserver(WindowOpenObserver, "domwindowopened", false);
-      } else {
-         dump("PWA_DEBUG: Observer service missing, cannot register focus hooks.\n");
       }
 
     } catch (e) {
@@ -252,7 +243,7 @@ let
     }
   '';
 
-  # Define config files as store paths to avoid shell escaping issues
+  # Define config files as store paths
   autoconfigJs = pkgs.writeText "autoconfig.js" ''
     pref("general.config.filename", "mozilla.cfg");
     pref("general.config.obscure_value", 0);
@@ -265,8 +256,6 @@ let
   pwaFirefox =
     let
       unwrapped = pkgs.firefox.unwrapped or pkgs.firefox;
-
-      # 1. Patched Unwrapped: SymlinkJoin everything EXCEPT the binary.
       patchedUnwrapped = pkgs.symlinkJoin {
         name = "firefox-pwa-patched";
         paths = [ unwrapped ];
@@ -275,11 +264,8 @@ let
           if [ -f "$out/lib/firefox/firefox" ]; then
             rm "$out/lib/firefox/firefox"
             cp "${unwrapped}/lib/firefox/firefox" "$out/lib/firefox/firefox"
-            
-            # Inject Configs - Install to BOTH pref and preferences to be safe
             mkdir -p "$out/lib/firefox/defaults/pref"
             mkdir -p "$out/lib/firefox/defaults/preferences"
-            
             cp "${autoconfigJs}" "$out/lib/firefox/defaults/pref/autoconfig.js"
             cp "${autoconfigJs}" "$out/lib/firefox/defaults/preferences/autoconfig.js"
             cp "${mozillaCfg}" "$out/lib/firefox/mozilla.cfg"
@@ -297,16 +283,9 @@ let
       }
       ''
         mkdir -p $out/bin
-
-        # 2. Wrapper Patcher
         if [ -f "${pkgs.firefox}/bin/firefox" ]; then
-          # Robustly remove the old exec line by filtering lines starting with 'exec'
-          # We use grep -v to exclude the line, which is safer than sed regexes against weird whitespace
           grep -v '^\s*exec' "${pkgs.firefox}/bin/firefox" > "$out/bin/firefox"
-          
-          # Append our custom exec line
           echo 'exec -a "$0" "${patchedUnwrapped}/lib/firefox/firefox" "$@"' >> "$out/bin/firefox"
-          
           chmod +x "$out/bin/firefox"
         else
           ln -s "${patchedUnwrapped}/lib/firefox/firefox" "$out/bin/firefox"
@@ -369,6 +348,24 @@ let
     };
   };
 
+  # --- SEARCH ENGINE SUBMODULE ---
+  searchSubmodule = types.submodule {
+    options = {
+      name = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+      };
+      url = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+      };
+      icon = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+      };
+    };
+  };
+
   appSubmodule = types.submodule (
     { config, name, ... }:
     {
@@ -387,10 +384,13 @@ let
           type = types.listOf extensionSubmodule;
           default = [ ];
         };
+        search = mkOption {
+          type = searchSubmodule;
+          default = { };
+        };
         layoutStart = mkOption {
           type = types.listOf types.str;
           default = [
-            "home"
             "urlbar"
             "reload"
           ];
@@ -483,6 +483,7 @@ in
               id = app.id;
               name = app.name;
             };
+
             layoutJson = lib.replaceStrings [ "'" ] [ "\\'" ] (mkLayoutState app.layoutStart app.layoutEnd);
             hasBack = elem "back" (app.layoutStart ++ app.layoutEnd);
             hasForward = elem "forward" (app.layoutStart ++ app.layoutEnd);
@@ -534,11 +535,114 @@ in
               default_search = { };
             };
 
+            # --- Search JSON Generation ---
+            # Explicitly matching the user's manual configuration dump.
+            searchJson =
+              if (app.search.name != null && app.search.url != null) then
+                builtins.toJSON {
+                  version = 13;
+                  engines = [
+                    {
+                      id = "google";
+                      _name = "Google";
+                      _isConfigEngine = true;
+                      _metaData = {
+                        order = 1;
+                        hidden = true;
+                      };
+                    }
+                    {
+                      id = "bing";
+                      _name = "Bing";
+                      _isConfigEngine = true;
+                      _metaData = {
+                        order = 2;
+                        hidden = true;
+                      };
+                    }
+                    {
+                      id = "ddg";
+                      _name = "DuckDuckGo";
+                      _isConfigEngine = true;
+                      _metaData = {
+                        order = 3;
+                        hidden = true;
+                      };
+                    }
+                    {
+                      id = "perplexity";
+                      _name = "Perplexity";
+                      _isConfigEngine = true;
+                      _metaData = {
+                        order = 5;
+                        hidden = true;
+                      };
+                    }
+                    {
+                      id = "wikipedia";
+                      _name = "Wikipedia (en)";
+                      _isConfigEngine = true;
+                      _metaData = {
+                        order = 6;
+                        hidden = true;
+                      };
+                    }
+                    {
+                      id = "ebay-pl";
+                      _name = "eBay";
+                      _isConfigEngine = true;
+                      _metaData = {
+                        order = 4;
+                        hidden = true;
+                      };
+                    }
+
+                    # Custom Engine
+                    {
+                      id = "pwa-custom-search";
+                      _name = app.search.name;
+                      _loadPath = "[user]";
+                      _iconMapObj = if (app.search.icon != null) then { "32" = app.search.icon; } else { };
+                      _metaData = {
+                        alias = "";
+                        order = 7;
+                      };
+                      _urls = [
+                        {
+                          template = app.search.url;
+                          rels = [ ];
+                          params = [ ];
+                        }
+                      ];
+                      _definedAliases = [ ];
+                    }
+                  ];
+                  metaData = {
+                    locale = "en-US";
+                    region = "PL";
+                    channel = "default";
+                    experiment = "";
+                    distroID = "nixos";
+                    appDefaultEngineId = "google";
+                    useSavedOrder = true;
+                    defaultEngineId = "pwa-custom-search";
+                    defaultEngineIdHash = "coWN0aFt2mwVL03WgGmnIeb8U8Eq9Jk8TGFEL/vyFZM=";
+                  };
+                }
+              else
+                "";
+
           in
           ''
             echo "Configuring PWA: ${app.name} (${app.id})"
             PWA_DIR="${profileBaseDir}/${app.id}"
             mkdir -p "$PWA_DIR/chrome" "$PWA_DIR/extensions"
+
+            # Write Search JSON (Compressed)
+            ${optionalString (searchJson != "") ''
+              echo '${searchJson}' | ${pythonWithLz4}/bin/python3 ${mozlz4Script} "$PWA_DIR/search.json.mozlz4"
+            ''}
+
             cat > "$PWA_DIR/pwa.json" <<EOF
             ${pwaConfigJson}
             EOF
@@ -555,13 +659,21 @@ in
             user_pref("browser.sessionstore.resume_from_crash", false);
             user_pref("browser.startup.homepage_override.mstone", "ignore");
             user_pref("browser.startup.page", 1);
+
+            // Override the default homepage to explicitly point to the app's URL
             user_pref("browser.startup.homepage", "${app.url}");
-            // Legacy New Tab URL preference (Fallback)
+
             user_pref("browser.newtab.url", "${app.url}");
             user_pref("devtools.chrome.enabled", true);
             user_pref("browser.dom.window.dump.enabled", true);
             user_pref("extensions.autoDisableScopes", 0);
             user_pref("extensions.install_distro_addons", true);
+
+            ${optionalString (app.search.name != null) ''
+              user_pref("browser.search.hiddenOneOffs", "${commonHidden}");
+              user_pref("keyword.enabled", true);
+            ''}
+
             ${optionalString (cfg.firefoxGnomeTheme != null) ''
               user_pref("svg.context-properties.content.enabled", true);
               user_pref("gnomeTheme.hideSingleTab", true);
