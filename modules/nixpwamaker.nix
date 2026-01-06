@@ -12,8 +12,6 @@ let
 
   # --- Constants & Paths ---
   profileBaseDir = "${config.home.homeDirectory}/.local/share/pwamaker-profiles";
-
-  # Default engines to hide when a custom PWA engine is active
   commonHidden = "Google,Bing,Amazon.com,DuckDuckGo,Wikipedia (en)";
 
   # --- Python Script for MozLZ4 Compression ---
@@ -256,6 +254,13 @@ let
   pwaFirefox =
     let
       unwrapped = pkgs.firefox.unwrapped or pkgs.firefox;
+
+      # Prepare Native Messaging Hosts
+      nativeMessagingHostsJoined = pkgs.symlinkJoin {
+        name = "pwa-native-messaging-hosts";
+        paths = cfg.nativeMessagingHosts;
+      };
+
       patchedUnwrapped = pkgs.symlinkJoin {
         name = "firefox-pwa-patched";
         paths = [ unwrapped ];
@@ -284,7 +289,13 @@ let
       ''
         mkdir -p $out/bin
         if [ -f "${pkgs.firefox}/bin/firefox" ]; then
+          # Extract the environment setup from the original wrapper, stripping the exec line
           grep -v '^\s*exec' "${pkgs.firefox}/bin/firefox" > "$out/bin/firefox"
+          
+          # Inject the Native Messaging Hosts environment variable
+          echo 'export MOZ_NATIVE_MESSAGING_HOSTS="${nativeMessagingHostsJoined}/lib/mozilla/native-messaging-hosts"' >> "$out/bin/firefox"
+          
+          # Execute the patched binary
           echo 'exec -a "$0" "${patchedUnwrapped}/lib/firefox/firefox" "$@"' >> "$out/bin/firefox"
           chmod +x "$out/bin/firefox"
         else
@@ -388,6 +399,14 @@ let
           type = searchSubmodule;
           default = { };
         };
+
+        # [NEW] Option to toggle Built-in Password Manager
+        enablePasswordManager = mkOption {
+          type = types.bool;
+          default = false;
+          description = "Enable the built-in Firefox password manager (signon.rememberSignons). Defaults to false.";
+        };
+
         layoutStart = mkOption {
           type = types.listOf types.str;
           default = [
@@ -422,6 +441,11 @@ let
           type = types.listOf types.str;
           default = [ ];
         };
+        openUrls = mkOption {
+          type = types.listOf types.str;
+          default = [ ];
+          description = "List of substrings to match in the URL (e.g., 'x.com' or 'twitter.com'). If matched, this PWA handles the link.";
+        };
       };
     }
   );
@@ -430,6 +454,22 @@ in
 {
   options.programs.pwamaker = {
     enable = mkEnableOption "Firefox PWA Maker Declarative Module (Autoconfig Edition)";
+
+    nativeMessagingHosts = mkOption {
+      type = types.listOf types.package;
+      default = [ ];
+      description = "List of packages containing native messaging hosts (e.g. pkgs.keepassxc) to make available to the PWA Firefox.";
+    };
+
+    dispatcher = {
+      enable = mkEnableOption "Enable internal URL dispatcher (Acts as default browser to route links to PWAs)";
+      fallbackBrowser = mkOption {
+        type = types.str;
+        default = "firefox";
+        description = "Command to run for links that don't match any PWA (e.g. 'firefox', 'google-chrome-stable')";
+      };
+    };
+
     firefoxGnomeTheme = mkOption {
       type = types.nullOr types.path;
       default = null;
@@ -441,17 +481,79 @@ in
   };
 
   config = mkIf cfg.enable {
-    xdg.desktopEntries = mapAttrs (key: app: {
-      name = app.name;
-      genericName = "Web Application";
-      exec = "${pwaFirefox}/bin/firefox --no-remote --profile \"${profileBaseDir}/${app.id}\" --name \"FFPWA-${app.id}\" \"${app.url}\"";
-      icon = app.icon;
-      categories = app.categories;
-      settings = {
-        Keywords = concatStringsSep ";" app.keywords;
-        StartupWMClass = "FFPWA-${app.id}";
+    # 1. Generate the Dispatcher Script
+    home.packages = mkIf cfg.dispatcher.enable [
+      (pkgs.writeScriptBin "pwa-dispatcher" ''
+        #!${pkgs.bash}/bin/bash
+        URL="$1"
+
+        if [ -z "$URL" ]; then
+          exec ${cfg.dispatcher.fallbackBrowser}
+        fi
+
+        ${concatStrings (
+          mapAttrsToList (
+            name: app:
+            optionalString (app.openUrls != [ ]) ''
+              # Match for PWA: ${app.name} (${app.id})
+              ${concatMapStrings (pattern: ''
+                if [[ "$URL" == *"${pattern}"* ]]; then
+                  echo "PWA Dispatcher: Opening $URL in ${app.name}..."
+                  exec ${pwaFirefox}/bin/firefox --no-remote --profile "${profileBaseDir}/${app.id}" --name "FFPWA-${app.id}" "$URL"
+                fi
+              '') app.openUrls}
+            ''
+          ) cfg.apps
+        )}
+
+        echo "PWA Dispatcher: No PWA match found. Opening in fallback browser..."
+        exec ${cfg.dispatcher.fallbackBrowser} "$URL"
+      '')
+    ];
+
+    # 2. Register Dispatcher as a Desktop Entry
+    xdg.desktopEntries =
+      (mapAttrs (key: app: {
+        name = app.name;
+        genericName = "Web Application";
+        exec = "${pwaFirefox}/bin/firefox --no-remote --profile \"${profileBaseDir}/${app.id}\" --name \"FFPWA-${app.id}\" %U";
+        icon = app.icon;
+        categories = app.categories;
+        settings = {
+          Keywords = concatStringsSep ";" app.keywords;
+          StartupWMClass = "FFPWA-${app.id}";
+        };
+      }) cfg.apps)
+      // (optionalAttrs cfg.dispatcher.enable {
+        pwa-dispatcher = {
+          name = "PWA Dispatcher";
+          genericName = "Web Browser Dispatcher";
+          exec = "pwa-dispatcher %U";
+          icon = "web-browser";
+          categories = [
+            "Network"
+            "WebBrowser"
+          ];
+          mimeType = [
+            "text/html"
+            "text/xml"
+            "application/xhtml+xml"
+            "x-scheme-handler/http"
+            "x-scheme-handler/https"
+          ];
+        };
+      });
+
+    # 3. Set Dispatcher as Default Application
+    xdg.mimeApps = mkIf cfg.dispatcher.enable {
+      enable = true;
+      defaultApplications = {
+        "x-scheme-handler/http" = "pwa-dispatcher.desktop";
+        "x-scheme-handler/https" = "pwa-dispatcher.desktop";
+        "text/html" = "pwa-dispatcher.desktop";
+        "application/xhtml+xml" = "pwa-dispatcher.desktop";
       };
-    }) cfg.apps;
+    };
 
     home.activation.pwaMakerApply = lib.hm.dag.entryAfter [ "writeBoundary" ] (
       let
@@ -535,8 +637,6 @@ in
               default_search = { };
             };
 
-            # --- Search JSON Generation ---
-            # Explicitly matching the user's manual configuration dump.
             searchJson =
               if (app.search.name != null && app.search.url != null) then
                 builtins.toJSON {
@@ -597,7 +697,6 @@ in
                       };
                     }
 
-                    # Custom Engine
                     {
                       id = "pwa-custom-search";
                       _name = app.search.name;
@@ -638,7 +737,6 @@ in
             PWA_DIR="${profileBaseDir}/${app.id}"
             mkdir -p "$PWA_DIR/chrome" "$PWA_DIR/extensions"
 
-            # Write Search JSON (Compressed)
             ${optionalString (searchJson != "") ''
               echo '${searchJson}' | ${pythonWithLz4}/bin/python3 ${mozlz4Script} "$PWA_DIR/search.json.mozlz4"
             ''}
@@ -660,7 +758,14 @@ in
             user_pref("browser.startup.homepage_override.mstone", "ignore");
             user_pref("browser.startup.page", 1);
 
-            // Override the default homepage to explicitly point to the app's URL
+            // Password Manager (Default: Disabled)
+            user_pref("signon.rememberSignons", ${if app.enablePasswordManager then "true" else "false"});
+            user_pref("signon.autofillForms", ${if app.enablePasswordManager then "true" else "false"});
+
+            user_pref("browser.ctrlTab.sortByRecentlyUsed", true);
+            user_pref("middlemouse.paste", false);
+            user_pref("general.autoScroll", true);
+
             user_pref("browser.startup.homepage", "${app.url}");
 
             user_pref("browser.newtab.url", "${app.url}");
