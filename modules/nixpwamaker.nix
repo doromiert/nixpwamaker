@@ -81,12 +81,25 @@ let
 
   resolveLayout = layoutList: map (item: layoutMap.${item} or item) layoutList;
 
+  # Helper to generate Firefox widget IDs from Extension IDs
+  # Rule: Lowercase -> Replace '@' and '.' with '_' -> Append '-browser-action'
+  sanitizeExtensionId =
+    id:
+    let
+      lower = lib.toLower id;
+      replaced = lib.replaceStrings [ "@" "." ] [ "_" "_" ] lower;
+    in
+    "${replaced}-browser-action";
+
   mkLayoutState =
-    start: end:
+    start: end: extensions:
+    let
+      extensionWidgets = map (e: sanitizeExtensionId e.id) extensions;
+    in
     builtins.toJSON {
       placements = {
         "widget-overflow-fixed-list" = [ ];
-        "unified-extensions-area" = [ ];
+        "unified-extensions-area" = extensionWidgets; # Explicitly place in menu
         "nav-bar" = [ ];
         "toolbar-menubar" = [ "menubar-items" ];
         "TabsToolbar" =
@@ -105,7 +118,8 @@ let
           "tabbrowser-tabs"
           "new-tab-button"
         ]
-        ++ (resolveLayout end);
+        ++ (resolveLayout end)
+        ++ extensionWidgets;
       dirtyAreaCache = [
         "nav-bar"
         "TabsToolbar"
@@ -350,6 +364,14 @@ let
     }
     .urlbarView { margin-top: 0 !important; }
     #taskbar-tabs-button { display: none !important; }
+
+    /* Safety Net: Force extensions to stay off the toolbar */
+    /* Strictly target only the toolbar containers to avoid hiding menu items */
+    #nav-bar-customization-target > .unified-extensions-item,
+    #TabsToolbar-customization-target > .unified-extensions-item,
+    #nav-bar > .unified-extensions-item {
+      display: none !important;
+    }
   '';
 
   extensionSubmodule = types.submodule {
@@ -586,7 +608,11 @@ in
               name = app.name;
             };
 
-            layoutJson = lib.replaceStrings [ "'" ] [ "\\'" ] (mkLayoutState app.layoutStart app.layoutEnd);
+            # Pass extensions list to mkLayoutState
+            layoutJson = lib.replaceStrings [ "'" ] [ "\\'" ] (
+              mkLayoutState app.layoutStart app.layoutEnd app.extensions
+            );
+
             hasBack = elem "back" (app.layoutStart ++ app.layoutEnd);
             hasForward = elem "forward" (app.layoutStart ++ app.layoutEnd);
             hideButtonsCss = ''
