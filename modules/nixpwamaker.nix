@@ -14,29 +14,21 @@ let
   profileBaseDir = "${config.home.homeDirectory}/.local/share/pwamaker-profiles";
 
   # --- Layout Definitions ---
-  # Maps user-friendly names to Firefox internal IDs
   layoutMap = {
-    # Navigation
     "back" = "back-button";
     "forward" = "forward-button";
     "reload" = "stop-reload-button";
     "home" = "home-button";
     "urlbar" = "urlbar-container";
-
-    # Spacers
     "spacer" = "spacer";
     "flexible" = "spring";
     "vertical-spacer" = "vertical-spacer";
-
-    # Tabs & Windows
     "tabs" = "tabbrowser-tabs";
     "alltabs" = "alltabs-button";
     "newtab" = "new-tab-button";
     "close" = "close-page-button";
     "minimize" = "minimize-button";
     "maximize" = "maximize-button";
-
-    # Tools & Menus
     "menu" = "open-menu-button";
     "addons" = "unified-extensions-button";
     "downloads" = "downloads-button";
@@ -49,8 +41,6 @@ let
     "fullscreen" = "fullscreen-button";
     "zoom" = "zoom-controls";
     "developer" = "developer-button";
-
-    # PWA Specific
     "site-info" = "site-info";
     "notifications" = "notifications-button";
     "tracking" = "tracking-protection-button";
@@ -58,10 +48,8 @@ let
     "permissions" = "permissions-button";
   };
 
-  # Helper to resolve layout lists to internal IDs
   resolveLayout = layoutList: map (item: layoutMap.${item} or item) layoutList;
 
-  # Helper to generate the browser.uiCustomization.state JSON
   mkLayoutState =
     start: end:
     builtins.toJSON {
@@ -99,13 +87,236 @@ let
       newElementCount = 5;
     };
 
+  # --- Autoconfig Script (Global) ---
+  globalMozillaCfg = ''
+    // mozilla.cfg - PWA Focus & URL Override
+    // IMPORTANT: The first line must be a comment.
+
+    // DEBUG: Print to stdout (terminal) so we know this file loaded.
+    if (typeof dump !== 'undefined') dump("PWA_DEBUG: mozilla.cfg is loading...\n");
+
+    try {
+      // --- HELPER: XPCOM Service Getter ---
+      const getService = (contractID, interfaceName) => 
+        Cc[contractID].getService(Ci[interfaceName]);
+
+      // --- 1. SETUP SERVICES (Fallbacks for broken ESMs) ---
+      let Services = {};
+      
+      try {
+         // Try Loading Services ESM (Standard)
+         if (ChromeUtils.importESModule) {
+            const { Services: s } = ChromeUtils.importESModule("resource://gre/modules/Services.sys.mjs");
+            Services = s;
+         } else {
+            // Very old fallback
+            Services = ChromeUtils.import("resource://gre/modules/Services.jsm").Services;
+         }
+      } catch(e) {
+         if (typeof dump !== 'undefined') dump("PWA_DEBUG: Services ESM load failed (" + e + "), using XPCOM fallback.\n");
+         // Fallback to XPCOM interfaces if module loading fails
+         Services = {
+           dirsvc: getService("@mozilla.org/file/directory_service;1", "nsIProperties"),
+           obs: getService("@mozilla.org/observer-service;1", "nsIObserverService"),
+           wm: getService("@mozilla.org/appshell/window-mediator;1", "nsIWindowMediator"),
+           scriptSecurityManager: getService("@mozilla.org/scriptsecuritymanager;1", "nsIScriptSecurityManager")
+         };
+      }
+      
+      // Ensure SecurityManager is available
+      const getSSM = () => {
+         if (Services.scriptSecurityManager) return Services.scriptSecurityManager;
+         try { return getService("@mozilla.org/scriptsecuritymanager;1", "nsIScriptSecurityManager"); } 
+         catch(e) { return null; }
+      };
+
+      // --- 2. READ PROFILE CONFIG (pwa.json) ---
+      let pwaConfig = {};
+      try {
+        let profileDir = Services.dirsvc.get("ProfD", Ci.nsIFile);
+        let configFile = profileDir.clone();
+        configFile.append("pwa.json");
+        
+        if (configFile.exists()) {
+          // Standard File Input Stream
+          let fstream = Cc["@mozilla.org/network/file-input-stream;1"]
+                          .createInstance(Ci.nsIFileInputStream);
+          fstream.init(configFile, -1, 0, 0);
+          
+          // Converter Stream to handle UTF-8 text properly
+          let cstream = Cc["@mozilla.org/intl/converter-input-stream;1"]
+                          .createInstance(Ci.nsIConverterInputStream);
+          cstream.init(fstream, "UTF-8", 0, 0);
+          
+          let str = {};
+          // Read entire stream
+          cstream.readString(-1, str);
+          cstream.close();
+          fstream.close();
+          
+          // Parse JSON from string
+          pwaConfig = JSON.parse(str.value);
+          
+          if (typeof dump !== 'undefined') dump("PWA_DEBUG: Loaded pwa.json for " + pwaConfig.name + "\n");
+        } else {
+          if (typeof dump !== 'undefined') dump("PWA_DEBUG: pwa.json not found in " + profileDir.path + "\n");
+        }
+      } catch (ex) {
+        if (typeof dump !== 'undefined') dump("PWA_DEBUG: Error reading pwa.json: " + ex + "\n");
+      }
+
+      // --- 3. APPLY NEW TAB URL (Method A: AboutNewTab Service) ---
+      if (pwaConfig.url) {
+        try {
+          // Attempt to set via AboutNewTab service (Preferred)
+          const { AboutNewTab } = ChromeUtils.importESModule("resource:///modules/AboutNewTab.sys.mjs");
+          AboutNewTab.newTabURL = pwaConfig.url;
+          if (typeof dump !== 'undefined') dump("PWA_DEBUG: Set AboutNewTab.newTabURL to " + pwaConfig.url + "\n");
+        } catch(e) {
+           if (typeof dump !== 'undefined') dump("PWA_DEBUG: Failed to set AboutNewTab.newTabURL: " + e + "\n");
+        }
+      }
+
+      // --- 4. DEFINE FOCUS & REDIRECT LOGIC ---
+      const forceContentFocus = (win) => {
+        if (win && win.gBrowser && win.gBrowser.selectedBrowser) {
+          win.setTimeout(() => {
+            const browser = win.gBrowser.selectedBrowser;
+            
+            // Method B: Direct Redirect
+            // If the user just opened a new tab, it might be about:newtab, about:blank, or about:home
+            const currentSpec = browser.currentURI ? browser.currentURI.spec : "";
+            if (pwaConfig.url && (currentSpec === "about:newtab" || currentSpec === "about:home" || currentSpec === "about:blank")) {
+               if (typeof dump !== 'undefined') dump("PWA_DEBUG: Forcing redirect from " + currentSpec + " to " + pwaConfig.url + "\n");
+               
+               try {
+                   // fixupAndLoadURIString is robust for partial URLs, but loadURI with ssm is safer for full URLs
+                   const ssm = getSSM();
+                   const triggeringPrincipal = ssm ? ssm.getSystemPrincipal() : null;
+                   
+                   if (browser.fixupAndLoadURIString) {
+                        browser.fixupAndLoadURIString(pwaConfig.url, { triggeringPrincipal });
+                   } else {
+                        browser.loadURI(pwaConfig.url, { triggeringPrincipal });
+                   }
+               } catch(e) {
+                   if (typeof dump !== 'undefined') dump("PWA_DEBUG: Redirect failed: " + e + "\n");
+               }
+            }
+
+            // Force Focus
+            browser.focus();
+          }, 0);
+        }
+      };
+      
+      // Helper to find top window robustly
+      const getTopWindow = () => {
+         try {
+            const { BrowserWindowTracker } = ChromeUtils.importESModule("resource:///modules/BrowserWindowTracker.sys.mjs");
+            return BrowserWindowTracker.getTopWindow();
+         } catch(e) {
+            return Services.wm.getMostRecentWindow("navigator:browser");
+         }
+      };
+
+      // --- 5. OBSERVERS ---
+      const NewTabObserver = {
+        observe: function(subject, topic, data) {
+          if (topic === "browser-open-newtab-start") {
+            const win = getTopWindow();
+            forceContentFocus(win);
+          }
+        }
+      };
+
+      const WindowOpenObserver = {
+        observe: function(subject, topic, data) {
+          const win = subject;
+          win.addEventListener("load", () => {
+            forceContentFocus(win);
+          }, { once: true });
+        }
+      };
+
+      // Register Observers
+      if (Services.obs) {
+        Services.obs.addObserver(NewTabObserver, "browser-open-newtab-start", false);
+        Services.obs.addObserver(WindowOpenObserver, "domwindowopened", false);
+      } else {
+         dump("PWA_DEBUG: Observer service missing, cannot register focus hooks.\n");
+      }
+
+    } catch (e) {
+      if (typeof dump !== 'undefined') dump("PWA_DEBUG: FATAL ERROR in mozilla.cfg: " + e + "\n");
+    }
+  '';
+
+  # Define config files as store paths to avoid shell escaping issues
+  autoconfigJs = pkgs.writeText "autoconfig.js" ''
+    pref("general.config.filename", "mozilla.cfg");
+    pref("general.config.obscure_value", 0);
+    pref("general.config.sandbox_enabled", false);
+  '';
+
+  mozillaCfg = pkgs.writeText "mozilla.cfg" globalMozillaCfg;
+
+  # --- Wrapped Firefox Package ---
+  pwaFirefox =
+    let
+      unwrapped = pkgs.firefox.unwrapped or pkgs.firefox;
+
+      # 1. Patched Unwrapped: SymlinkJoin everything EXCEPT the binary.
+      patchedUnwrapped = pkgs.symlinkJoin {
+        name = "firefox-pwa-patched";
+        paths = [ unwrapped ];
+        buildInputs = [ pkgs.makeWrapper ];
+        postBuild = ''
+          if [ -f "$out/lib/firefox/firefox" ]; then
+            rm "$out/lib/firefox/firefox"
+            cp "${unwrapped}/lib/firefox/firefox" "$out/lib/firefox/firefox"
+            
+            # Inject Configs - Install to BOTH pref and preferences to be safe
+            mkdir -p "$out/lib/firefox/defaults/pref"
+            mkdir -p "$out/lib/firefox/defaults/preferences"
+            
+            cp "${autoconfigJs}" "$out/lib/firefox/defaults/pref/autoconfig.js"
+            cp "${autoconfigJs}" "$out/lib/firefox/defaults/preferences/autoconfig.js"
+            cp "${mozillaCfg}" "$out/lib/firefox/mozilla.cfg"
+          else
+            echo "ERROR: Could not find firefox binary in lib/firefox/"
+            exit 1
+          fi
+        '';
+      };
+
+    in
+    pkgs.runCommand "firefox-pwa-edition"
+      {
+        nativeBuildInputs = [ pkgs.makeWrapper ];
+      }
+      ''
+        mkdir -p $out/bin
+
+        # 2. Wrapper Patcher
+        if [ -f "${pkgs.firefox}/bin/firefox" ]; then
+          # Robustly remove the old exec line by filtering lines starting with 'exec'
+          # We use grep -v to exclude the line, which is safer than sed regexes against weird whitespace
+          grep -v '^\s*exec' "${pkgs.firefox}/bin/firefox" > "$out/bin/firefox"
+          
+          # Append our custom exec line
+          echo 'exec -a "$0" "${patchedUnwrapped}/lib/firefox/firefox" "$@"' >> "$out/bin/firefox"
+          
+          chmod +x "$out/bin/firefox"
+        else
+          ln -s "${patchedUnwrapped}/lib/firefox/firefox" "$out/bin/firefox"
+        fi
+      '';
+
   # --- Global CSS ---
-  # Standard PWA Headerbar & Auto-hide URL bar logic
   globalUserChrome = ''
-    /* --- Base Layout Fixes --- */
     .tab-content::before { display: none; }
     .toolbarbutton-icon { --tab-border-radius: 0; }
-
     .toolbar-items {
       padding-left: 0 !important;
       padding-right: 0px !important;
@@ -113,78 +324,48 @@ let
       height: 46px !important;
       align-items: center;
     }
-
     #TabsToolbar, #navigator-toolbox { height: 46px !important; }
     #TabsToolbar-customization-target { height: 46px; }
     .toolbarbutton-1 { height: 34px !important; }
-
     #PanelUI-menu-button {
       right: 8px;
       top: 6px !important;
       position: absolute;
     }
-
     [data-l10n-id="browser-window-close-button"] {
       position: relative;
       right: 3px !important;
       top: 17px !important;
     }
-
-    /* Fixed Height is critical for layout stability */
     #nav-bar {
       right: 40px !important;
       height: 46px !important;
     }
-
-    /* Raise index when URL bar is focused so it floats above everything */
     #nav-bar:focus-within {
       z-index: 2147483647 !important;
     }
-
-    /* --- AUTO-HIDING URL BAR LOGIC (Floating "Command Palette" Style) --- */
-
     #urlbar-container {
       position: fixed !important;
-      /* Default State: Hidden above view */
       top: -100px !important; 
       left: 92px;
       right: 40px !important;
       width: calc(100vw - 92px - 92px) !important;
-      
       z-index: 9999 !important;
-      
-      /* Only allow interaction when visible */
       pointer-events: none !important;
     }
-
-    /* STATE 2: FOCUSED (Visible) - Triggers on Ctrl+L */
     #urlbar-container:focus-within {
-      /* Bring into view */
       top: 6px !important;
-      /* CRITICAL: Keep position FIXED. Switching to absolute causes glitching on blur. */
       position: fixed !important; 
       pointer-events: auto !important;
     }
-
-    /* Optional: Fix for some themes where popup might have negative margins */
-    .urlbarView {
-      margin-top: 0 !important;
-    }
+    .urlbarView { margin-top: 0 !important; }
+    #taskbar-tabs-button { display: none !important; }
   '';
-
-  # --- Submodules ---
 
   extensionSubmodule = types.submodule {
     options = {
-      id = mkOption {
-        type = types.str;
-        example = "uBlock0@raymondhill.net";
-        description = "Extension ID. Must match the ID in the manifest EXACTLY.";
-      };
-      url = mkOption {
-        type = types.str;
-        description = "Direct download URL for the extension (.xpi file).";
-      };
+      id = mkOption { type = types.str; };
+      url = mkOption { type = types.str; };
     };
   };
 
@@ -195,63 +376,39 @@ let
         id = mkOption {
           type = types.str;
           default = name;
-          description = "Unique ID for the PWA profile (used for directory name). Defaults to attribute name.";
         };
-        name = mkOption {
-          type = types.str;
-          description = "Display name of the application.";
-        };
-        url = mkOption {
-          type = types.str;
-          description = "URL the PWA opens.";
-        };
+        name = mkOption { type = types.str; };
+        url = mkOption { type = types.str; };
         icon = mkOption {
           type = types.str;
           default = "web-browser";
-          description = "Icon name or path.";
         };
         extensions = mkOption {
           type = types.listOf extensionSubmodule;
           default = [ ];
-          description = "List of extensions to install.";
         };
         layoutStart = mkOption {
           type = types.listOf types.str;
           default = [
-            # "back" - Removed by default
-            # "forward" - Removed by default
             "urlbar"
             "reload"
           ];
-          description = "Ordered list of items to appear before the tabs.";
         };
         layoutEnd = mkOption {
           type = types.listOf types.str;
-          default = [
-            "addons"
-          ];
-          description = "Ordered list of items to appear after the tabs.";
+          default = [ "addons" ];
         };
         userChrome = mkOption {
           type = types.lines;
           default = "";
-          description = "Custom CSS to append to userChrome.css.";
-          example = ''
-            #nav-bar { visibility: collapse !important; }
-          '';
         };
         userContent = mkOption {
           type = types.lines;
           default = "";
-          description = "Custom CSS to append to userContent.css.";
         };
         extraPrefs = mkOption {
           type = types.lines;
           default = "";
-          description = "Extra lines to append to user.js (prefs).";
-          example = ''
-            user_pref("browser.display.use_system_colors", true);
-          '';
         };
         categories = mkOption {
           type = types.listOf types.str;
@@ -271,29 +428,22 @@ let
 in
 {
   options.programs.pwamaker = {
-    enable = mkEnableOption "Firefox PWA Maker Declarative Module";
-
+    enable = mkEnableOption "Firefox PWA Maker Declarative Module (Autoconfig Edition)";
     firefoxGnomeTheme = mkOption {
       type = types.nullOr types.path;
       default = null;
-      description = "Path to the firefox-gnome-theme flake input (or local path). If set, enables the theme integration.";
     };
-
     apps = mkOption {
-      description = "Attribute set of PWA configurations.";
       default = { };
       type = types.attrsOf appSubmodule;
     };
   };
 
   config = mkIf cfg.enable {
-
-    # 1. Desktop Entries
     xdg.desktopEntries = mapAttrs (key: app: {
       name = app.name;
       genericName = "Web Application";
-      # --no-remote: Important to allow a separate instance from your main browser
-      exec = "${getExe pkgs.firefox} --no-remote --profile \"${profileBaseDir}/${app.id}\" --name \"FFPWA-${app.id}\" \"${app.url}\"";
+      exec = "${pwaFirefox}/bin/firefox --no-remote --profile \"${profileBaseDir}/${app.id}\" --name \"FFPWA-${app.id}\" \"${app.url}\"";
       icon = app.icon;
       categories = app.categories;
       settings = {
@@ -302,30 +452,20 @@ in
       };
     }) cfg.apps;
 
-    # 2. Activation Script
-    # We generate the script using let-bindings for better readability.
     home.activation.pwaMakerApply = lib.hm.dag.entryAfter [ "writeBoundary" ] (
       let
         curl = getExe pkgs.curl;
-
-        # Script to remove profiles that are no longer in the config
         cleanupScript = ''
           echo "Cleaning up stale PWA profiles..."
           CURRENT_IDS=(${toString (mapAttrsToList (n: v: v.id) cfg.apps)})
-
           if [ -d "${profileBaseDir}" ]; then
             for dir in "${profileBaseDir}"/*; do
               [ -d "$dir" ] || continue
               base_name=$(basename "$dir")
-              
               keep=0
               for id in "''${CURRENT_IDS[@]}"; do
-                if [ "$id" == "$base_name" ]; then
-                  keep=1
-                  break
-                fi
+                if [ "$id" == "$base_name" ]; then keep=1; break; fi
               done
-
               if [ "$keep" -eq 0 ]; then
                 echo "Removing deleted PWA profile: $base_name"
                 rm -rf "$dir"
@@ -334,47 +474,31 @@ in
           fi
         '';
 
-        # Function to generate the setup script for a single app
         mkAppScript =
           name: app:
           let
+            pwaConfigJson = builtins.toJSON {
+              url = app.url;
+              id = app.id;
+              name = app.name;
+            };
             layoutJson = lib.replaceStrings [ "'" ] [ "\\'" ] (mkLayoutState app.layoutStart app.layoutEnd);
-
-            # Check for back/forward buttons
             hasBack = elem "back" (app.layoutStart ++ app.layoutEnd);
             hasForward = elem "forward" (app.layoutStart ++ app.layoutEnd);
             hideButtonsCss = ''
               ${optionalString (!hasBack) "#back-button { display: none !important; }"}
               ${optionalString (!hasForward) "#forward-button { display: none !important; }"}
             '';
-
-            # Prepare CSS content
             baseChrome = optionalString (
               cfg.firefoxGnomeTheme != null
             ) ''@import "firefox-gnome-theme/userChrome.css";'';
             baseContent = optionalString (
               cfg.firefoxGnomeTheme != null
             ) ''@import "firefox-gnome-theme/userContent.css";'';
-
-            # Combine: Base (Gnome) -> Global Fixes -> Hidden Buttons -> App Specific
             fullChromeCss =
               baseChrome + "\n" + globalUserChrome + "\n" + hideButtonsCss + "\n" + app.userChrome;
             fullContentCss = baseContent + "\n" + app.userContent;
-
-            # --- DEFAULT EXTENSIONS ---
-            # New Tab Override (to handle custom new tab URLs and focus)
-            defaultExtensions = [
-              {
-                id = "newtaboverride@agenedia.com";
-                url = "https://addons.mozilla.org/firefox/downloads/latest/new-tab-override/latest.xpi";
-              }
-            ];
-
-            # Merge with user extensions
-            allExtensions = defaultExtensions ++ app.extensions;
-
-            # --- EXTENSION CONFIG FILES ---
-            # Define default permissions for both built-in and user extensions
+            allExtensions = app.extensions;
             builtinExtensionPreferences = {
               "newtab@mozilla.org" = {
                 permissions = [
@@ -384,65 +508,7 @@ in
                 origins = [ ];
                 data_collection = [ ];
               };
-              "addons-search-detection@mozilla.com" = {
-                permissions = [
-                  "internal:privateBrowsingAllowed"
-                  "internal:svgContextPropertiesAllowed"
-                ];
-                origins = [ ];
-                data_collection = [ ];
-              };
-              "formautofill@mozilla.org" = {
-                permissions = [
-                  "internal:privateBrowsingAllowed"
-                  "internal:svgContextPropertiesAllowed"
-                ];
-                origins = [ ];
-                data_collection = [ ];
-              };
-              "data-leak-blocker@mozilla.com" = {
-                permissions = [
-                  "internal:privateBrowsingAllowed"
-                  "internal:svgContextPropertiesAllowed"
-                ];
-                origins = [ ];
-                data_collection = [ ];
-              };
-              "ipp-activator@mozilla.com" = {
-                permissions = [
-                  "internal:privateBrowsingAllowed"
-                  "internal:svgContextPropertiesAllowed"
-                ];
-                origins = [ ];
-                data_collection = [ ];
-              };
-              "pictureinpicture@mozilla.org" = {
-                permissions = [
-                  "internal:privateBrowsingAllowed"
-                  "internal:svgContextPropertiesAllowed"
-                ];
-                origins = [ ];
-                data_collection = [ ];
-              };
-              "webcompat@mozilla.org" = {
-                permissions = [
-                  "internal:privateBrowsingAllowed"
-                  "internal:svgContextPropertiesAllowed"
-                ];
-                origins = [ ];
-                data_collection = [ ];
-              };
-              "default-theme@mozilla.org" = {
-                permissions = [
-                  "internal:privateBrowsingAllowed"
-                  "internal:svgContextPropertiesAllowed"
-                ];
-                origins = [ ];
-                data_collection = [ ];
-              };
             };
-
-            # Generate preferences for user extensions using their IDs
             userExtensionPreferences = lib.listToAttrs (
               map (ext: {
                 name = ext.id;
@@ -456,20 +522,14 @@ in
                 };
               }) allExtensions
             );
-
-            # Merge lists and convert to JSON
-            finalExtensionPreferences = builtinExtensionPreferences // userExtensionPreferences;
-            extensionPreferencesJson = builtins.toJSON finalExtensionPreferences;
-
-            # Default settings file to prevent first-run noise
+            extensionPreferencesJson = builtins.toJSON (
+              builtinExtensionPreferences // userExtensionPreferences
+            );
             extensionSettingsJson = builtins.toJSON {
               version = 3;
               commands = { };
               url_overrides = { };
               prefs = { };
-              newTabNotification = { };
-              homepageNotification = { };
-              tabHideNotification = { };
               default_search = { };
             };
 
@@ -478,90 +538,57 @@ in
             echo "Configuring PWA: ${app.name} (${app.id})"
             PWA_DIR="${profileBaseDir}/${app.id}"
             mkdir -p "$PWA_DIR/chrome" "$PWA_DIR/extensions"
-
-            # --- Generate user.js ---
+            cat > "$PWA_DIR/pwa.json" <<EOF
+            ${pwaConfigJson}
+            EOF
             cat > "$PWA_DIR/user.js" <<EOF
             // Generated by nixpwamaker
-
-            // Layout
             user_pref("browser.uiCustomization.state", '${layoutJson}');
-
-            // Standard PWA feel
             user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);
+            user_pref("browser.link.open_newwindow", 3);
+            user_pref("browser.link.open_newwindow.restriction", 0);
+            user_pref("browser.tabs.loadInBackground", false);
+            user_pref("browser.search.openintab", false);
+            user_pref("browser.taskbarTabs.enabled", false);
             user_pref("browser.shell.checkDefaultBrowser", false);
             user_pref("browser.sessionstore.resume_from_crash", false);
-            user_pref("browser.link.open_newwindow", 3);
             user_pref("browser.startup.homepage_override.mstone", "ignore");
-
-            // Homepage
             user_pref("browser.startup.page", 1);
             user_pref("browser.startup.homepage", "${app.url}");
-
-            // Debugging Support
+            // Legacy New Tab URL preference (Fallback)
+            user_pref("browser.newtab.url", "${app.url}");
             user_pref("devtools.chrome.enabled", true);
-            user_pref("devtools.debugger.remote-enabled", true);
-            user_pref("devtools.debugger.prompt-connection", false);
-
-            // Extensions
+            user_pref("browser.dom.window.dump.enabled", true);
             user_pref("extensions.autoDisableScopes", 0);
             user_pref("extensions.install_distro_addons", true);
-
             ${optionalString (cfg.firefoxGnomeTheme != null) ''
-              // Gnome Theme Specific Prefs
               user_pref("svg.context-properties.content.enabled", true);
               user_pref("gnomeTheme.hideSingleTab", true);
               user_pref("gnomeTheme.tabsAsHeaderbar", true);
-              user_pref("gnomeTheme.normalWidthTabs", false);
-              user_pref("gnomeTheme.activeTabContrast", true);
             ''}
-
-            // Extra Prefs
             ${app.extraPrefs}
             EOF
-
-            # --- Setup Theme Symlinks ---
             ${optionalString (cfg.firefoxGnomeTheme != null) ''
               ln -sfn "${cfg.firefoxGnomeTheme}" "$PWA_DIR/chrome/firefox-gnome-theme"
             ''}
-
-            # --- Write CSS Config ---
             cat > "$PWA_DIR/chrome/userChrome.css" <<EOF
             ${fullChromeCss}
             EOF
-
             cat > "$PWA_DIR/chrome/userContent.css" <<EOF
             ${fullContentCss}
             EOF
-
-            # --- Write Extension Config Files ---
-            # These files ensure extensions have permission to run (e.g. in private windows)
-            # and prevent first-run popups.
-
             cat > "$PWA_DIR/extension-preferences.json" <<EOF
             ${extensionPreferencesJson}
             EOF
-
             cat > "$PWA_DIR/extension-settings.json" <<EOF
             ${extensionSettingsJson}
             EOF
-
-            # --- Install Extensions (Impure) ---
-            # Note: The 'id' in the config MUST match the ID in the extension's manifest.json
             ${concatMapStrings (ext: ''
               EXT_FILE="$PWA_DIR/extensions/${ext.id}.xpi"
-
-              # Cleanup empty failed downloads from previous runs
-              if [ -f "$EXT_FILE" ] && [ ! -s "$EXT_FILE" ]; then
-                echo "Removing empty file for ${ext.id}"
-                rm "$EXT_FILE"
-              fi
-
+              if [ -f "$EXT_FILE" ] && [ ! -s "$EXT_FILE" ]; then rm "$EXT_FILE"; fi
               if [ ! -f "$EXT_FILE" ]; then
                 echo "Downloading extension ${ext.id}..."
-                # -f: fail silently on server errors (404)
-                # -L: follow redirects
-                # || ...: cleanup if download fails
-                ${curl} -f -L -s -o "$EXT_FILE" "${ext.url}" || (rm -f "$EXT_FILE" && echo "Failed to download ${ext.id} - Check ID/URL")
+                ${curl} -f -L -s -o "$EXT_FILE" "${ext.url}" || (rm -f "$EXT_FILE" && echo "Failed to download ${ext.id}")
               fi
             '') allExtensions}
           '';
@@ -570,11 +597,8 @@ in
       ''
         echo "Starting PWAMaker activation..."
         mkdir -p "${profileBaseDir}"
-
         ${cleanupScript}
-
         ${concatStrings (mapAttrsToList mkAppScript cfg.apps)}
-
         echo "PWAMaker activation complete."
       ''
     );
