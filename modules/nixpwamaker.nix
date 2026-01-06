@@ -378,7 +378,7 @@ let
   };
 
   appSubmodule = types.submodule (
-    { config, name, ... }:
+    { name, ... }:
     {
       options = {
         id = mkOption {
