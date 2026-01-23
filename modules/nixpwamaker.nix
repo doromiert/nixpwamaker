@@ -318,6 +318,7 @@ let
       '';
 
   # --- Global CSS ---
+  # [FIX] UPDATED CSS: RESTORED FIXED HEIGHT, FLOATING BANNERS
   globalUserChrome = ''
     .tab-content::before { display: none; }
     .toolbarbutton-icon { --tab-border-radius: 0; }
@@ -328,7 +329,15 @@ let
       height: 46px !important;
       align-items: center;
     }
-    #TabsToolbar, #navigator-toolbox { height: 46px !important; }
+
+    /* [FIX] RESTORED STRICT 46PX HEIGHT (Prevents bloated header) */
+    /* We use overflow: visible here to allow banners to pop out if needed, */
+    /* although position: fixed on the banner handles that mostly. */
+    #TabsToolbar, #navigator-toolbox {
+       height: 46px !important;
+       overflow: visible !important; 
+    }
+
     #TabsToolbar-customization-target { height: 46px; }
     .toolbarbutton-1 { height: 34px !important; }
     #PanelUI-menu-button {
@@ -366,11 +375,31 @@ let
     #taskbar-tabs-button { display: none !important; }
 
     /* Safety Net: Force extensions to stay off the toolbar */
-    /* Strictly target only the toolbar containers to avoid hiding menu items */
     #nav-bar-customization-target > .unified-extensions-item,
     #TabsToolbar-customization-target > .unified-extensions-item,
     #nav-bar > .unified-extensions-item {
       display: none !important;
+    }
+
+    /* --- [FIX] FLOATING INFOBARS (Banners) --- */
+    /* This forces the "Allow Mic", "Translate", etc. bars to float OVER the content */
+    /* and break out of the 46px header limitation. */
+
+    .notificationbox-stack {
+      position: fixed !important;
+      top: 46px !important; /* Sit exactly below the titlebar */
+      left: 0 !important;
+      right: 0 !important;
+      z-index: 2147483647 !important; /* Maximum Z-Index */
+      width: 100vw !important;
+      max-height: 50vh !important;
+    }
+
+    notification-message {
+      box-shadow: 0 4px 15px rgba(0,0,0,0.3) !important;
+      margin-bottom: 0px !important;
+      border-bottom: 1px solid rgba(0,0,0,0.1) !important;
+      transition: transform 0.2s ease-out !important;
     }
   '';
 
@@ -779,7 +808,6 @@ in
             user_pref("browser.tabs.loadInBackground", false);
             user_pref("browser.search.openintab", false);
             user_pref("browser.taskbarTabs.enabled", false);
-            user_pref("browser.shell.checkDefaultBrowser", false);
             user_pref("browser.sessionstore.resume_from_crash", false);
             user_pref("browser.startup.homepage_override.mstone", "ignore");
             user_pref("browser.startup.page", 1);
@@ -799,6 +827,43 @@ in
             user_pref("browser.dom.window.dump.enabled", true);
             user_pref("extensions.autoDisableScopes", 0);
             user_pref("extensions.install_distro_addons", true);
+
+            // --- [P5.2] BLOAT REMOVAL & NETWORK SILENCE ---
+            user_pref("extensions.pocket.enabled", false);
+            user_pref("identity.fxaccounts.enabled", false);
+            user_pref("extensions.screenshots.disabled", true);
+            user_pref("reader.parse-on-load.enabled", false);
+
+            // --- Network Silence ---
+            user_pref("network.http.speculative-parallel-limit", 0);
+            user_pref("network.dns.disablePrefetch", true);
+            user_pref("browser.urlbar.speculativeConnect.enabled", false);
+
+            // --- Crash Reporter ---
+            user_pref("toolkit.crashreporter.enabled", false);
+            user_pref("browser.tabs.crashReporting.sendReport", false);
+
+            // --- [P13.D] GRAPHICS & PERFORMANCE ---
+            user_pref("gfx.webrender.all", true);
+            user_pref("media.ffmpeg.vaapi.enabled", true);
+            user_pref("widget.dmabuf.force-enabled", true);
+            user_pref("widget.wayland.fractional-scale.enabled", false);
+            user_pref("layers.acceleration.force-enabled", true);
+
+            // --- [P5.2] RESOURCE OPTIMIZATION ---
+            user_pref("dom.ipc.processCount", 2);
+            user_pref("accessibility.force_disabled", 1);
+            user_pref("browser.sessionhistory.max_entries", 5);
+            user_pref("browser.cache.memory.capacity", 262144);
+            user_pref("network.prefetch-next", false);
+            user_pref("browser.sessionstore.interval", 120000);
+            user_pref("toolkit.cosmeticAnimations.enabled", false);
+
+            // --- UI ANNOYANCE REMOVAL ---
+            user_pref("browser.translations.enable", false);
+            user_pref("browser.translations.automaticallyPopup", false);
+            user_pref("browser.shell.checkDefaultBrowser", false);
+            user_pref("media.videocontrols.picture-in-picture.video-toggle.enabled", false);
 
             ${optionalString (app.search.name != null) ''
               user_pref("browser.search.hiddenOneOffs", "${commonHidden}");
