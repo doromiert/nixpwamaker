@@ -39,6 +39,7 @@ assert mixed.programs.pwamaker.apps.legacy.browser == "firefox";
 assert mixed.xdg.desktopEntries ? legacy;
 assert mixed.xdg.dataFile ? "applications/${desktopName}.desktop";
 assert !(only.home.activation ? pwaMakerApply);
+assert (make { }).config.home.activation ? pwaMakerApply;
 assert lib.hasInfix "/legacy" mixed.home.activation.pwaMakerApply.data;
 assert !(lib.hasInfix "Configuring PWA: Mail (mail)" mixed.home.activation.pwaMakerApply.data);
 assert only.xdg.dataFile."applications/${desktopName}.desktop".target == renamed.xdg.dataFile."applications/${desktopName}.desktop".target;

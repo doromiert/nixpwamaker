@@ -670,7 +670,7 @@ in
       };
     };
 
-    home.activation.pwaMakerApply = mkIf (firefoxApps != { }) (lib.hm.dag.entryAfter [ "writeBoundary" ] (
+    home.activation.pwaMakerApply = mkIf (firefoxApps != { } || gnosisApps == { }) (lib.hm.dag.entryAfter [ "writeBoundary" ] (
       let
         curl = getExe pkgs.curl;
         cleanupScript = ''
