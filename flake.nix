@@ -1,5 +1,5 @@
 {
-  description = "Firefox PWA Maker Module";
+  description = "Firefox and Gnosis PWA Maker Module";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";

@@ -10,6 +10,16 @@ with lib;
 let
   cfg = config.programs.pwamaker;
 
+  firefoxApps = filterAttrs (_: app: app.browser == "firefox") cfg.apps;
+  gnosisApps = filterAttrs (_: app: app.browser == "gnosis") cfg.apps;
+  gnosisId = app: "com.neg-zero.Gnosis.WebApp_${app.id}";
+  gnosisExecutable = if cfg.gnosisPackage == null then "gnosis" else getExe' cfg.gnosisPackage "gnosis";
+  appCommand = app:
+    if app.browser == "gnosis" then
+      escapeShellArgs [ gnosisExecutable "--application-mode=${gnosisId app}.desktop" ]
+    else
+      escapeShellArgs [ "${pwaFirefox}/bin/firefox" "--no-remote" "--profile" "${profileBaseDir}/${app.id}" "--name" "FFPWA-${app.id}" ];
+
   # --- Constants & Paths ---
   profileBaseDir = "${config.home.homeDirectory}/.local/share/pwamaker-profiles";
   commonHidden = "Google,Bing,Amazon.com,DuckDuckGo,Wikipedia (en)";
@@ -432,6 +442,11 @@ let
     { name, ... }:
     {
       options = {
+        browser = mkOption {
+          type = types.enum [ "firefox" "gnosis" ];
+          default = cfg.browser;
+          description = "Browser backend for this application.";
+        };
         id = mkOption {
           type = types.str;
           default = name;
@@ -504,7 +519,19 @@ let
 in
 {
   options.programs.pwamaker = {
-    enable = mkEnableOption "Firefox PWA Maker Declarative Module (Autoconfig Edition)";
+    enable = mkEnableOption "declarative Firefox and Gnosis web applications";
+
+    browser = mkOption {
+      type = types.enum [ "firefox" "gnosis" ];
+      default = "firefox";
+      description = "Default browser backend; each app can override it.";
+    };
+
+    gnosisPackage = mkOption {
+      type = types.nullOr types.package;
+      default = pkgs.gnosis or null;
+      description = "Gnosis package with declarative web-app support. Required for Gnosis apps; ZenPkgs supplies its catalog package.";
+    };
 
     nativeMessagingHosts = mkOption {
       type = types.listOf types.package;
@@ -516,7 +543,7 @@ in
       enable = mkEnableOption "Enable internal URL dispatcher (Acts as default browser to route links to PWAs)";
       fallbackBrowser = mkOption {
         type = types.str;
-        default = "firefox";
+        default = if cfg.browser == "gnosis" then escapeShellArg gnosisExecutable else "firefox";
         description = "Command to run for links that don't match any PWA (e.g. 'firefox', 'google-chrome-stable')";
       };
     };
@@ -532,8 +559,25 @@ in
   };
 
   config = mkIf cfg.enable {
+    assertions = [ {
+      assertion = gnosisApps == { } || cfg.gnosisPackage != null;
+      message = "programs.pwamaker.gnosisPackage must be set when using Gnosis apps.";
+    } ] ++ mapAttrsToList (_: app: {
+      assertion = builtins.match "[A-Za-z0-9_-]+" app.id != null && app.name != "" &&
+        builtins.match "https?://[^[:space:]\"\\\\]+" app.url != null;
+      message = "Gnosis app ${app.id}: use an alphanumeric/underscore/hyphen ID, a nonempty name, and an HTTP(S) URL without whitespace, quotes or backslashes.";
+    }) gnosisApps ++ mapAttrsToList (_: app: {
+      assertion = app.extensions == [ ] && app.search == { name = null; url = null; icon = null; } &&
+        app.userChrome == "" && app.userContent == "" && app.extraPrefs == "" &&
+        !app.enablePasswordManager && app.layoutStart == [ "home" "reload" ] && app.layoutEnd == [ "addons" ];
+      message = "Gnosis app ${app.id}: extensions, search, password-manager, toolbar and CSS preferences are Firefox-only; configure Gnosis itself for browser preferences.";
+    }) gnosisApps ++ [ {
+      assertion = length (unique (mapAttrsToList (_: app: app.id) cfg.apps)) == length (attrNames cfg.apps);
+      message = "programs.pwamaker.apps must have unique IDs.";
+    } ];
+
     # 1. Generate the Dispatcher Script
-    home.packages = mkIf cfg.dispatcher.enable [
+    home.packages = optional (gnosisApps != { } && cfg.gnosisPackage != null) cfg.gnosisPackage ++ optionals cfg.dispatcher.enable [
       (pkgs.writeScriptBin "pwa-dispatcher" ''
         #!${pkgs.bash}/bin/bash
         URL="$1"
@@ -546,11 +590,11 @@ in
           mapAttrsToList (
             name: app:
             optionalString (app.openUrls != [ ]) ''
-              # Match for PWA: ${app.name} (${app.id})
+              # Match this app’s configured URL patterns.
               ${concatMapStrings (pattern: ''
-                if [[ "$URL" == *"${pattern}"* ]]; then
-                  echo "PWA Dispatcher: Opening $URL in ${app.name}..."
-                  exec ${pwaFirefox}/bin/firefox --no-remote --profile "${profileBaseDir}/${app.id}" --name "FFPWA-${app.id}" "$URL"
+                if [[ "$URL" == *${escapeShellArg pattern}* ]]; then
+                  echo "PWA Dispatcher: Opening matching web app..."
+                  exec ${appCommand app} "$URL"
                 fi
               '') app.openUrls}
             ''
@@ -574,7 +618,7 @@ in
           Keywords = concatStringsSep ";" app.keywords;
           StartupWMClass = "FFPWA-${app.id}";
         };
-      }) cfg.apps)
+      }) firefoxApps)
       // (optionalAttrs cfg.dispatcher.enable {
         pwa-dispatcher = {
           name = "PWA Dispatcher";
@@ -595,6 +639,26 @@ in
         };
       });
 
+    # Gnosis discovers managed entries in the user's XDG data directory.
+    xdg.dataFile = mapAttrs' (_: app:
+      let
+        id = gnosisId app;
+        desktop = pkgs.makeDesktopItem {
+          name = id;
+          desktopName = app.name;
+          genericName = "Web Application";
+          exec = "${gnosisExecutable} --application-mode=${id}.desktop \"${replaceStrings [ "`" "$" "%" ] [ "\\\\`" "\\\\$" "%%" ] app.url}\"";
+          inherit (app) icon categories;
+          extraConfig = {
+            Keywords = concatStringsSep ";" app.keywords;
+            StartupWMClass = id;
+            "X-Gnosis-Declarative" = "true";
+          };
+        };
+      in nameValuePair "applications/${id}.desktop" {
+        source = "${desktop}/share/applications/${id}.desktop";
+      }) gnosisApps;
+
     # 3. Set Dispatcher as Default Application
     xdg.mimeApps = mkIf cfg.dispatcher.enable {
       enable = true;
@@ -606,7 +670,7 @@ in
       };
     };
 
-    home.activation.pwaMakerApply = lib.hm.dag.entryAfter [ "writeBoundary" ] (
+    home.activation.pwaMakerApply = mkIf (firefoxApps != { }) (lib.hm.dag.entryAfter [ "writeBoundary" ] (
       let
         curl = getExe pkgs.curl;
         cleanupScript = ''
@@ -907,9 +971,9 @@ in
         echo "Starting PWAMaker activation..."
         mkdir -p "${profileBaseDir}"
         ${cleanupScript}
-        ${concatStrings (mapAttrsToList mkAppScript cfg.apps)}
+        ${concatStrings (mapAttrsToList mkAppScript firefoxApps)}
         echo "PWAMaker activation complete."
       ''
-    );
+    ));
   };
 }
